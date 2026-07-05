@@ -1,0 +1,570 @@
+const express = require('express');
+const cors = require('cors');
+const path = require('path');
+const tmdb = require('./tmdb');
+const scrapers = require('./scrapers');
+
+const app = express();
+
+// Enable CORS for Stremio client compatibility
+app.use(cors());
+app.use(express.json());
+
+// Declare the Stremio Addon Manifest
+const manifest = {
+  id: 'com.flava.spanish',
+  version: '1.0.0',
+  name: 'Flava 🌊',
+  description: 'Películas y Series en Español Latino y Castellano directas de Cinecalidad, SoloLatino, TioPlus y CineHDPlus.',
+  logo: 'https://images.unsplash.com/photo-1574267431422-7bda297781f5?q=80&w=256&auto=format&fit=crop',
+  background: 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?q=80&w=1280&auto=format&fit=crop',
+  types: ['movie', 'series'],
+  resources: [
+    {
+      name: 'stream',
+      types: ['movie', 'series'],
+      idPrefixes: ['tt', 'tmdb']
+    },
+    {
+      name: 'catalog',
+      types: ['movie', 'series'],
+      idPrefixes: ['tmdb']
+    },
+    {
+      name: 'meta',
+      types: ['movie', 'series'],
+      idPrefixes: ['tmdb']
+    }
+  ],
+  catalogs: [
+    {
+      type: 'movie',
+      id: 'flava_movies_trending',
+      name: 'Flava - Tendencias Películas',
+      extra: [{ name: 'search', isRequired: false }]
+    },
+    {
+      type: 'series',
+      id: 'flava_series_trending',
+      name: 'Flava - Tendencias Series',
+      extra: [{ name: 'search', isRequired: false }]
+    }
+  ]
+};
+
+// 1. Manifest Endpoint
+app.get('/manifest.json', (req, res) => {
+  res.json(manifest);
+});
+
+// 2. Catalog Endpoint (Standard)
+app.get('/catalog/:type/:id.json', async (req, res) => {
+  const { type, id } = req.params;
+  await handleCatalog(type, id, null, res);
+});
+
+// Catalog Endpoint (With search or filters)
+app.get('/catalog/:type/:id/:extra.json', async (req, res) => {
+  const { type, id, extra } = req.params;
+  await handleCatalog(type, id, extra, res);
+});
+
+async function handleCatalog(type, id, extra, res) {
+  let searchQuery = '';
+  if (extra) {
+    const match = extra.match(/search=(.+)/);
+    if (match) {
+      searchQuery = decodeURIComponent(match[1]);
+    }
+  }
+
+  try {
+    let metas = [];
+    if (searchQuery) {
+      metas = await tmdb.searchCatalog(type, searchQuery);
+    } else if (id === 'flava_movies_trending' || id === 'flava_series_trending') {
+      metas = await tmdb.getTrending(type);
+    }
+
+    res.json({ metas });
+  } catch (error) {
+    console.error('Catalog Route Error:', error.message);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+}
+
+// 3. Metadata Endpoint
+app.get('/meta/:type/:id.json', async (req, res) => {
+  const { type, id } = req.params;
+
+  try {
+    if (id.startsWith('tmdb:')) {
+      const tmdbId = id.split(':')[2];
+      const meta = await tmdb.getMetaDetails(type, tmdbId);
+      if (meta) {
+        return res.json({ meta });
+      }
+    }
+    res.status(404).json({ error: 'Metadata not found' });
+  } catch (error) {
+    console.error('Meta Route Error:', error.message);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+// 4. Stream Endpoint
+app.get('/stream/:type/:id.json', async (req, res) => {
+  const { type, id } = req.params;
+  
+  // Parse season & episode if it is a TV show (series)
+  let cleanId = id;
+  let season = null;
+  let episode = null;
+
+  // Stremio series ID formats:
+  // - IMDb: tt1234567:1:1 (imdbId:season:episode)
+  // - TMDB: tmdb:series:12345:1:1 (tmdb:series:id:season:episode)
+  if (type === 'series') {
+    const parts = id.split(':');
+    if (id.startsWith('tmdb:')) {
+      cleanId = `tmdb:series:${parts[2]}`;
+      season = parseInt(parts[3]) || 1;
+      episode = parseInt(parts[4]) || 1;
+    } else {
+      cleanId = parts[0];
+      season = parseInt(parts[1]) || 1;
+      episode = parseInt(parts[2]) || 1;
+    }
+  }
+
+  console.log(`Stream request: Type=${type}, ID=${cleanId}, Season=${season}, Episode=${episode}`);
+
+  try {
+    const streams = await scrapers.getStreams(type, cleanId, season, episode);
+    
+    // If no streams found, return empty array (Stremio format)
+    res.json({ streams: streams || [] });
+  } catch (error) {
+    console.error('Stream Route Error:', error.message);
+    res.json({ streams: [] });
+  }
+});
+
+// 5. Landing / Dashboard Page Route
+app.get('/', (req, res) => {
+  const host = req.get('host');
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+  const manifestUrl = `${protocol}://${host}/manifest.json`;
+  const stremioInstallUrl = `stremio://${host}/manifest.json`;
+
+  res.send(`
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Flava Addon - Stremio en Español</title>
+  <!-- Google Fonts Outfit & Inter -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+  
+  <style>
+    :root {
+      --bg-color: #07070d;
+      --panel-bg: rgba(18, 18, 29, 0.55);
+      --border-color: rgba(255, 255, 255, 0.08);
+      --primary-color: #8b5cf6;
+      --secondary-color: #ec4899;
+      --accent-color: #3b82f6;
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-color);
+      color: var(--text-main);
+      font-family: 'Inter', sans-serif;
+      min-height: 100vh;
+      overflow-x: hidden;
+      background-image: 
+        radial-gradient(circle at 10% 20%, rgba(139, 92, 246, 0.15) 0%, transparent 40%),
+        radial-gradient(circle at 90% 80%, rgba(236, 72, 153, 0.15) 0%, transparent 40%);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    h1, h2, h3 {
+      font-family: 'Outfit', sans-serif;
+    }
+
+    .container {
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 40px 20px;
+      width: 100%;
+      flex-grow: 1;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+
+    /* Header Styling */
+    header {
+      text-align: center;
+      margin-bottom: 50px;
+    }
+
+    .logo-container {
+      display: inline-block;
+      position: relative;
+      margin-bottom: 20px;
+    }
+
+    .logo-glow {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 120px;
+      height: 120px;
+      background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+      filter: blur(40px);
+      border-radius: 50%;
+      z-index: -1;
+      opacity: 0.8;
+      animation: pulse 4s infinite alternate;
+    }
+
+    .logo {
+      font-size: 4rem;
+      font-weight: 800;
+      background: linear-gradient(135deg, #a78bfa, #f472b6, #60a5fa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      letter-spacing: -2px;
+      text-shadow: 0 0 40px rgba(139, 92, 246, 0.3);
+    }
+
+    .subtitle {
+      font-size: 1.25rem;
+      color: var(--text-muted);
+      margin-top: 10px;
+      font-weight: 300;
+    }
+
+    /* Premium Glassmorphic Cards */
+    .glass-card {
+      background: var(--panel-bg);
+      backdrop-filter: blur(16px) saturate(120%);
+      -webkit-backdrop-filter: blur(16px) saturate(120%);
+      border: 1px solid var(--border-color);
+      border-radius: 24px;
+      padding: 40px;
+      box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+      margin-bottom: 30px;
+    }
+
+    .card-title {
+      font-size: 1.8rem;
+      font-weight: 600;
+      margin-bottom: 25px;
+      text-align: center;
+      background: linear-gradient(90deg, #fff, var(--text-muted));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    /* Grid of Providers */
+    .grid-providers {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 20px;
+      margin-bottom: 40px;
+    }
+
+    .provider-item {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 16px;
+      padding: 20px;
+      text-align: center;
+      transition: all 0.3s ease;
+    }
+
+    .provider-item:hover {
+      transform: translateY(-5px);
+      border-color: rgba(139, 92, 246, 0.4);
+      background: rgba(139, 92, 246, 0.05);
+      box-shadow: 0 5px 15px rgba(139, 92, 246, 0.1);
+    }
+
+    .provider-name {
+      font-weight: 600;
+      font-size: 1.1rem;
+      margin-bottom: 5px;
+    }
+
+    .provider-status {
+      font-size: 0.8rem;
+      color: #10b981; /* Green */
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+    }
+
+    .provider-status.warning {
+      color: #f59e0b; /* Yellow */
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background-color: currentColor;
+    }
+
+    /* Setup & Buttons */
+    .actions {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 20px;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+      color: white;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 1.2rem;
+      padding: 16px 36px;
+      border-radius: 50px;
+      box-shadow: 0 10px 25px -5px rgba(139, 92, 246, 0.5);
+      transition: all 0.3s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      border: none;
+      cursor: pointer;
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 15px 30px -5px rgba(139, 92, 246, 0.7);
+    }
+
+    .btn-secondary {
+      background: transparent;
+      color: var(--text-main);
+      border: 1px solid var(--border-color);
+      text-decoration: none;
+      font-weight: 500;
+      font-size: 0.95rem;
+      padding: 12px 28px;
+      border-radius: 50px;
+      transition: all 0.3s ease;
+      cursor: pointer;
+    }
+
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.05);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    .manifest-box {
+      width: 100%;
+      max-width: 600px;
+      margin-top: 10px;
+      position: relative;
+    }
+
+    .manifest-input {
+      width: 100%;
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 12px 15px;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      text-align: center;
+      outline: none;
+      font-family: monospace;
+      cursor: text;
+    }
+
+    /* Installation Steps */
+    .steps {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      margin-top: 10px;
+    }
+
+    .step-item {
+      display: flex;
+      gap: 15px;
+      align-items: flex-start;
+    }
+
+    .step-num {
+      background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      font-family: 'Outfit', sans-serif;
+      flex-shrink: 0;
+    }
+
+    .step-text {
+      font-size: 0.95rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+
+    .step-text strong {
+      color: var(--text-main);
+    }
+
+    /* Footer */
+    footer {
+      text-align: center;
+      padding: 30px 20px;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      border-top: 1px solid var(--border-color);
+      background: rgba(0, 0, 0, 0.2);
+    }
+
+    footer a {
+      color: var(--primary-color);
+      text-decoration: none;
+    }
+
+    footer a:hover {
+      text-decoration: underline;
+    }
+
+    @keyframes pulse {
+      0% {
+        opacity: 0.6;
+        transform: translate(-50%, -50%) scale(0.95);
+      }
+      100% {
+        opacity: 0.9;
+        transform: translate(-50%, -50%) scale(1.05);
+      }
+    }
+
+    @media (max-width: 600px) {
+      .logo {
+        font-size: 3rem;
+      }
+      .glass-card {
+        padding: 25px 15px;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <header>
+      <div class="logo-container">
+        <div class="logo-glow"></div>
+        <h1 class="logo">Flava</h1>
+      </div>
+      <p class="subtitle">Agregador premium de películas y series en español para Stremio</p>
+    </header>
+
+    <div class="glass-card">
+      <h2 class="card-title">Instalación Fácil</h2>
+      
+      <div class="actions">
+        <a href="${stremioInstallUrl}" class="btn-primary">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 4V20M20 12H4" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Instalar en Stremio
+        </a>
+        
+        <p style="text-align: center; font-size: 0.9rem; color: var(--text-muted);">
+          ¿No abre automáticamente? Copia el enlace del manifest de abajo y pégalo en la barra de búsqueda de Stremio.
+        </p>
+
+        <div class="manifest-box">
+          <input type="text" class="manifest-input" value="${manifestUrl}" readonly onclick="this.select(); document.execCommand('copy'); alert('¡Enlace de manifest copiado!');">
+        </div>
+      </div>
+    </div>
+
+    <div class="glass-card">
+      <h2 class="card-title">Fuentes Integradas</h2>
+      
+      <div class="grid-providers">
+        <div class="provider-item">
+          <div class="provider-name">SoloLatino.net</div>
+          <div class="provider-status">
+            <span class="dot"></span> Online
+          </div>
+        </div>
+        <div class="provider-item">
+          <div class="provider-name">Cinecalidad.am</div>
+          <div class="provider-status">
+            <span class="dot"></span> Online
+          </div>
+        </div>
+        <div class="provider-item">
+          <div class="provider-name">TioPlus.app</div>
+          <div class="provider-status">
+            <span class="dot"></span> Online
+          </div>
+        </div>
+        <div class="provider-item">
+          <div class="provider-name">CineHDPlus.org</div>
+          <div class="provider-status warning">
+            <span class="dot"></span> CF Guarded
+          </div>
+        </div>
+      </div>
+
+      <h2 class="card-title" style="margin-top: 40px; margin-bottom: 20px;">Cómo Configurar</h2>
+      <div class="steps">
+        <div class="step-item">
+          <div class="step-num">1</div>
+          <div class="step-text">Asegúrate de tener <strong>Stremio</strong> instalado en tu dispositivo (PC, Móvil, Smart TV o Fire Stick).</div>
+        </div>
+        <div class="step-item">
+          <div class="step-num">2</div>
+          <div class="step-text">Haz clic en el botón <strong>Instalar en Stremio</strong> superior para vincular el addon directamente.</div>
+        </div>
+        <div class="step-item">
+          <div class="step-num">3</div>
+          <div class="step-text">¡Todo listo! Ve al catálogo de Stremio y busca tus películas o series preferidas. Aparecerán los enlaces de <strong>Flava 🌊</strong> con sus respectivos servidores de video.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <p>Flava Addon v${manifest.version} | Alimentado directamente por TMDB API</p>
+  </footer>
+
+</body>
+</html>
+  `);
+});
+
+module.exports = app;
