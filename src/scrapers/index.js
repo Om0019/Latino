@@ -25,13 +25,19 @@ function isKnownBadStream(stream) {
 
 function scoreStream(stream) {
   const host = getStreamHost(stream);
-  const isDirect = Boolean(stream.url);
+  const title = (stream.title || '').toLowerCase();
+  const name = (stream.name || '').toLowerCase();
 
-  if (host.includes('mediafire.com') || host.includes('fireload.com')) return 0;
-  if (host.includes('acek-cdn.com') || host.includes('dramiyos-cdn.com')) return 1;
-  if (host.includes('goodstream') || host.includes('vimeos') || host.includes('premilkyway') || host.includes('turboviplay') || host.includes('cfglobalcdn')) return 2;
-  if (isDirect) return 3;
-  return 4;
+  if (name === 'sololatino' && title.includes('premium')) return 0;
+  if (name === 'cinecalidad' && title.includes('vimeos')) return 1;
+  if (host.includes('mediafire.com') || host.includes('fireload.com')) return 2;
+  if (name === 'sololatino') return 3;
+  if (name === 'cinecalidad' && title.includes('goodstream')) return 7;
+  if (name === 'tioplus' && title.includes('opción 1')) return 8;
+  if (host.includes('dramiyos-cdn.com') || host.includes('cfglobalcdn.com') || host.includes('turboviplay.com') || host.includes('premilkyway.com')) return 4;
+  if (host.includes('acek-cdn.com')) return 5;
+  if (host.includes('vimeos') || host.includes('goodstream')) return 6;
+  return 9;
 }
 
 function sortStreams(streams) {
