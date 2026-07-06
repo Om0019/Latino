@@ -136,6 +136,15 @@ async function scrape(title, year, type, season, episode) {
 
         if (directUrl) {
           streamObj.url = directUrl;
+          streamObj.behaviorHints = {
+            notWebReady: true,
+            proxyHeaders: {
+              request: {
+                "User-Agent": userAgent,
+                "Referer": opt.playerUrl
+              }
+            }
+          };
         } else {
           // Fallback to externalUrl if direct stream cannot be extracted
           streamObj.externalUrl = opt.playerUrl;

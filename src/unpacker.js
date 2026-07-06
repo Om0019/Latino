@@ -156,6 +156,13 @@ async function resolvePlayerStream(url, userAgent, referer) {
             }
         }
         
+        // Check for JS redirect (e.g. VOE initial page)
+        const jsRedirectMatch = html.match(/window\.location\.href\s*=\s*['"](https?:\/\/[^'"]+)['"]/);
+        if (jsRedirectMatch && jsRedirectMatch[1] !== url) {
+            console.log(`Unpacker: Following JS redirect to ${jsRedirectMatch[1]}`);
+            return await resolvePlayerStream(jsRedirectMatch[1], userAgent, referer);
+        }
+
         // Standard dean-edwards / direct extraction
         const directUrl = extractDirectStream(html);
         if (directUrl) return directUrl;

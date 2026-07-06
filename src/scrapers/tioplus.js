@@ -184,6 +184,15 @@ async function scrape(title, year, type, season, episode) {
 
           if (resolvedDirectUrl) {
             streamObj.url = resolvedDirectUrl;
+            streamObj.behaviorHints = {
+              notWebReady: true,
+              proxyHeaders: {
+                request: {
+                  "User-Agent": userAgent,
+                  "Referer": directStreamUrl || "https://tioplus.app/"
+                }
+              }
+            };
           } else {
             streamObj.externalUrl = directStreamUrl;
             streamObj.title = `TioPlus 🇪🇸 [Latino]\nServer: ${sInfo.name}\nExternal Web Player (Fallback)`;

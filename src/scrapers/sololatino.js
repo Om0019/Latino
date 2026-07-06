@@ -285,6 +285,15 @@ async function scrape(title, year, type, season, episode) {
 
             if (directUrl) {
               streamObj.url = directUrl;
+              streamObj.behaviorHints = {
+                notWebReady: true,
+                proxyHeaders: {
+                  request: {
+                    "User-Agent": userAgent,
+                    "Referer": streamUrl || "https://sololatino.net/"
+                  }
+                }
+              };
             } else {
               streamObj.externalUrl = streamUrl;
               streamObj.title = `SoloLatino 🇪🇸 [Latino]\nServer: ${pInfo.name}\nExternal Web Player (Fallback)`;
