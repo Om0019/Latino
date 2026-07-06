@@ -19,6 +19,102 @@ function buildEpisodeUrlFromSeriesSlug(slug, season, episode) {
   return `https://www.cinecalidad.am/ver-el-episodio/${slug}-${season}x${episode}/`;
 }
 
+function normalizeServerName(label) {
+  return (label || '')
+    .replace('Recomendado', '')
+    .replace(/Contraseña:.*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractDownloadPageLinks(movieDoc) {
+  const links = [];
+  const seen = new Set();
+
+  movieDoc('a[href*="?download="]').each((i, el) => {
+    const href = movieDoc(el).attr('href');
+    const serverName = normalizeServerName(movieDoc(el).text()) || `Descarga ${i + 1}`;
+    if (!href || seen.has(href)) return;
+    seen.add(href);
+    links.push({ downloadPageUrl: href, serverName });
+  });
+
+  return links;
+}
+
+function extractExternalDownloadLinks(movieDoc) {
+  const links = [];
+  const seen = new Set();
+
+  movieDoc('a').each((i, el) => {
+    const href = movieDoc(el).attr('href');
+    const serverName = normalizeServerName(movieDoc(el).text());
+    if (!href || !serverName) return;
+    if (href.includes('cinecalidad.am/ver-') && href.includes('?download=')) return;
+    if (!/mediafire|1fichier|megaup|fireload/i.test(serverName + ' ' + href)) return;
+    if (seen.has(href)) return;
+    seen.add(href);
+    links.push({ externalUrl: href, serverName });
+  });
+
+  return links;
+}
+
+async function isPlayableDownloadTarget(url, userAgent, referer) {
+  try {
+    const res = await fetch(url, {
+      method: 'HEAD',
+      redirect: 'manual',
+      headers: {
+        'User-Agent': userAgent,
+        'Referer': referer
+      }
+    });
+
+    const contentType = (res.headers.get('content-type') || '').toLowerCase();
+    const contentDisposition = (res.headers.get('content-disposition') || '').toLowerCase();
+
+    if (contentType.startsWith('video/') || contentType.includes('application/vnd.apple.mpegurl')) {
+      return true;
+    }
+
+    if (contentDisposition.includes('attachment') && !contentType.startsWith('text/html')) {
+      return true;
+    }
+
+    if (/\.(m3u8|mp4|mkv)(?:$|[?#])/i.test(url) && !contentType.startsWith('text/html')) {
+      return true;
+    }
+  } catch (error) {
+    console.error(`Cinecalidad: Error validating download target ${url}:`, error.message);
+  }
+
+  return false;
+}
+
+async function resolveDownloadPage(downloadPageUrl, userAgent, referer) {
+  try {
+    const res = await fetch(downloadPageUrl, {
+      headers: {
+        'User-Agent': userAgent,
+        'Referer': referer
+      }
+    });
+    if (!res.ok) return null;
+
+    const html = await res.text();
+    const matches = [...new Set(html.match(/https?:[^"'`\s<>]+/g) || [])];
+
+    return matches.find((url) => {
+      if (url.includes('cinecalidad.am') || url.includes('t.me/')) return false;
+      return /1fichier|megaup|mediafire|fireload/i.test(url);
+    }) || null;
+  } catch (error) {
+    console.error(`Cinecalidad: Error resolving download page ${downloadPageUrl}:`, error.message);
+    return null;
+  }
+}
+
 /**
  * Cinecalidad Scraper (Direct Streams)
  */
@@ -150,7 +246,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
       if (playerUrl) {
         playerOptions.push({
           playerUrl,
-          serverName: serverName.replace('Recomendado', '').trim()
+          serverName: normalizeServerName(serverName)
         });
       }
     });
@@ -158,6 +254,8 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     console.log(`Cinecalidad: Found ${playerOptions.length} player options. Fetching stream sources...`);
 
     const streams = [];
+    const downloadPageLinks = extractDownloadPageLinks(movieDoc);
+    const externalDownloadLinks = extractExternalDownloadLinks(movieDoc);
 
     // Concurrently fetch player pages and extract direct video streams
     const playerPromises = playerOptions.map(async (opt) => {
@@ -188,7 +286,57 @@ async function scrape(title, originalTitle, year, type, season, episode) {
 
     await Promise.all(playerPromises);
 
-    console.log(`Cinecalidad: Resolved ${streams.length} direct streams`);
+    const downloadTargets = await Promise.all(
+      downloadPageLinks.map(async (downloadLink) => {
+        const resolvedUrl = await resolveDownloadPage(downloadLink.downloadPageUrl, userAgent, targetPageUrl);
+        if (!resolvedUrl) return null;
+        const isPlayable = await isPlayableDownloadTarget(resolvedUrl, userAgent, targetPageUrl);
+        if (!isPlayable) return null;
+
+        return {
+          name: 'Cinecalidad',
+          title: `⬇ ${downloadLink.serverName}`,
+          url: resolvedUrl,
+          behaviorHints: {
+            notWebReady: true,
+            proxyHeaders: {
+              request: {
+                'User-Agent': userAgent,
+                'Referer': targetPageUrl
+              }
+            }
+          }
+        };
+      })
+    );
+
+    for (const stream of downloadTargets.filter(Boolean)) {
+      streams.push(stream);
+    }
+
+    for (const link of externalDownloadLinks) {
+      const isPlayable = await isPlayableDownloadTarget(link.externalUrl, userAgent, targetPageUrl);
+      if (!isPlayable) continue;
+
+      if (!streams.some((stream) => stream.url === link.externalUrl)) {
+        streams.push({
+          name: 'Cinecalidad',
+          title: `⬇ ${link.serverName}`,
+          url: link.externalUrl,
+          behaviorHints: {
+            notWebReady: true,
+            proxyHeaders: {
+              request: {
+                'User-Agent': userAgent,
+                'Referer': targetPageUrl
+              }
+            }
+          }
+        });
+      }
+    }
+
+    console.log(`Cinecalidad: Resolved ${streams.length} stream options`);
     return streams;
 
   } catch (error) {

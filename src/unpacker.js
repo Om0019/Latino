@@ -29,7 +29,11 @@ function extractDirectStream(html) {
   // Filter out non-video assets or ad servers
   const validDirect = directMatches.filter(link => {
     const l = link.toLowerCase();
-    return !l.includes('google-analytics') && !l.includes('analytics.js') && !l.includes('tagmanager');
+    return !l.includes('google-analytics')
+      && !l.includes('analytics.js')
+      && !l.includes('tagmanager')
+      && !l.includes('test-videos.co.uk')
+      && !l.includes('big_buck_bunny');
   });
 
   if (validDirect.length > 0) {
@@ -52,7 +56,10 @@ function extractDirectStream(html) {
       const streamMatches = unpacked.match(directRegex) || [];
       const validStreams = streamMatches.filter(link => {
         const l = link.toLowerCase();
-        return !l.includes('analytics') && !l.includes('ads');
+        return !l.includes('analytics')
+          && !l.includes('ads')
+          && !l.includes('test-videos.co.uk')
+          && !l.includes('big_buck_bunny');
       });
 
       if (validStreams.length > 0) {
@@ -210,7 +217,27 @@ function decryptEmbed69(html) {
                       let decrypted = decipher.update(ciphertext, undefined, 'utf8') + decipher.final('utf8');
                       const pad = decrypted.charCodeAt(decrypted.length - 1);
                       decrypted = decrypted.slice(0, -pad);
-                      decryptedLinks.push({ server: embed.servername, url: decrypted });
+                      decryptedLinks.push({ server: embed.servername, url: decrypted, kind: 'video' });
+                  } catch (e) {
+                      // ignore
+                  }
+              }
+          }
+      }
+
+      if (file.downloadEmbeds) {
+          for (const embed of file.downloadEmbeds) {
+              if (embed.link) {
+                  try {
+                      const raw = Buffer.from(embed.link, 'base64');
+                      const iv = raw.slice(0, 16);
+                      const ciphertext = raw.slice(16);
+                      const decipher = crypto.createDecipheriv('aes-256-cbc', aesKey, iv);
+                      decipher.setAutoPadding(false);
+                      let decrypted = decipher.update(ciphertext, undefined, 'utf8') + decipher.final('utf8');
+                      const pad = decrypted.charCodeAt(decrypted.length - 1);
+                      decrypted = decrypted.slice(0, -pad);
+                      decryptedLinks.push({ server: embed.servername, url: decrypted, kind: 'download' });
                   } catch (e) {
                       // ignore
                   }
@@ -266,8 +293,19 @@ async function resolvePlayerStream(url, userAgent, referer) {
             const embed69Links = decryptEmbed69(html);
             if (embed69Links && embed69Links.length > 0) {
                 // Try resolving the first valid video embed (e.g. vidhide)
-                for (const embed of embed69Links) {
-                    if (embed.server === 'vidhide' || embed.server === 'streamwish' || embed.server === 'voe') {
+                const rankedEmbeds = embed69Links.sort((a, b) => {
+                    const kindScore = (value) => value.kind === 'download' ? 0 : 1;
+                    const serverScore = (value) => {
+                        if (value.server === 'vidhide' || value.server === 'streamwish') return 0;
+                        if (value.server === 'filemoon' || value.server === 'rapidvideo') return 1;
+                        if (value.server === 'voe') return 3;
+                        return 2;
+                    };
+                    return kindScore(a) - kindScore(b) || serverScore(a) - serverScore(b);
+                });
+
+                for (const embed of rankedEmbeds) {
+                    if (embed.server === 'vidhide' || embed.server === 'streamwish' || embed.server === 'voe' || embed.server === 'filemoon' || embed.server === 'rapidvideo') {
                         const directUrl = await resolvePlayerStream(embed.url, userAgent, url);
                         if (directUrl) return directUrl;
                     }

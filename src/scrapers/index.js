@@ -6,8 +6,37 @@ const cinehdplus = require('./cinehdplus');
 const cuevana3i = require('./cuevana3i');
 
 const SCRAPER_TIMEOUT_MS = 6500;
+const SOLOLATINO_TIMEOUT_MS = 9000;
 const STREAM_VERIFICATION_TIMEOUT_MS = 1200;
 const ENABLE_CINEHDPLUS = false;
+
+function getStreamHost(stream) {
+  try {
+    return new URL(stream.url || stream.externalUrl).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function isKnownBadStream(stream) {
+  const url = (stream.url || stream.externalUrl || '').toLowerCase();
+  return url.includes('test-videos.co.uk') || url.includes('big_buck_bunny');
+}
+
+function scoreStream(stream) {
+  const host = getStreamHost(stream);
+  const isDirect = Boolean(stream.url);
+
+  if (host.includes('mediafire.com') || host.includes('fireload.com')) return 0;
+  if (host.includes('acek-cdn.com') || host.includes('dramiyos-cdn.com')) return 1;
+  if (host.includes('goodstream') || host.includes('vimeos') || host.includes('premilkyway') || host.includes('turboviplay') || host.includes('cfglobalcdn')) return 2;
+  if (isDirect) return 3;
+  return 4;
+}
+
+function sortStreams(streams) {
+  return [...streams].sort((a, b) => scoreStream(a) - scoreStream(b));
+}
 
 function withTimeout(promise, timeoutMs, label) {
   let timeoutId;
@@ -26,6 +55,11 @@ function withTimeout(promise, timeoutMs, label) {
 
 async function verifyStream(stream, userAgent) {
   if (!stream.url) return stream;
+
+  if (isKnownBadStream(stream)) {
+    console.log(`Scraper orchestrator: Filtering suspicious placeholder stream: ${stream.url}`);
+    return null;
+  }
 
   try {
     const controller = new AbortController();
@@ -108,7 +142,7 @@ async function getStreams(type, id, season, episode) {
 
     // 2. Invoke scrapers in parallel
     const scraperPromises = [
-      withTimeout(sololatino.scrape(title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, 'SoloLatino'),
+      withTimeout(sololatino.scrape(title, originalTitle, year, type, season, episode), SOLOLATINO_TIMEOUT_MS, 'SoloLatino'),
       withTimeout(cinecalidad.scrape(title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, 'Cinecalidad'),
       withTimeout(tioplus.scrape(title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, 'TioPlus'),
       withTimeout(cuevana3i.scrape(title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, 'Cuevana3i')
@@ -144,7 +178,7 @@ async function getStreams(type, id, season, episode) {
     // 3. Light verification pass to filter obvious 404s without delaying response too much
     const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
     const verifiedStreams = (await Promise.all(streams.map((stream) => verifyStream(stream, userAgent)))).filter(Boolean);
-    return verifiedStreams;
+    return sortStreams(verifiedStreams);
 
   } catch (err) {
     console.error('Error in combined getStreams:', err.message);

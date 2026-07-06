@@ -1,6 +1,6 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
-const TOKEN_CONCURRENCY = 2;
+const TOKEN_CONCURRENCY = 3;
 
 function cleanText(str) {
   if (!str) return '';
