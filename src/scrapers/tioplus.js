@@ -193,12 +193,8 @@ async function scrape(title, year, type, season, episode) {
                 }
               }
             };
-          } else {
-            streamObj.externalUrl = directStreamUrl;
-            streamObj.title = `TioPlus 🇪🇸 [Latino]\nServer: ${sInfo.name}\nExternal Web Player (Fallback)`;
+            streams.push(streamObj);
           }
-
-          streams.push(streamObj);
         }
       } catch (err) {
         console.error(`TioPlus: Error resolving player token for ${sInfo.name}:`, err.message);

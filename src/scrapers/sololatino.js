@@ -294,12 +294,8 @@ async function scrape(title, year, type, season, episode) {
                   }
                 }
               };
-            } else {
-              streamObj.externalUrl = streamUrl;
-              streamObj.title = `SoloLatino 🇪🇸 [Latino]\nServer: ${pInfo.name}\nExternal Web Player (Fallback)`;
+              streams.push(streamObj);
             }
-            
-            streams.push(streamObj);
           }
         } else {
           console.warn(`SoloLatino: API /api/player-url returned status ${apiRes.status} for server ${pInfo.name}`);

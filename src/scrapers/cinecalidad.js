@@ -145,14 +145,8 @@ async function scrape(title, year, type, season, episode) {
               }
             }
           };
-        } else {
-          // Fallback to externalUrl if direct stream cannot be extracted
-          streamObj.externalUrl = opt.playerUrl;
-          streamObj.title = `Cinecalidad 🇪🇸 [Castellano/Latino]\nServer: ${opt.serverName}\nExternal Web Player (Fallback)`;
+          streams.push(streamObj);
         }
-
-        streams.push(streamObj);
-      } catch (err) {
         console.error(`Cinecalidad: Error resolving direct stream for ${opt.serverName}:`, err.message);
       }
     });
