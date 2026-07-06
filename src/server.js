@@ -29,9 +29,121 @@ const manifest = {
   catalogs: []
 };
 
+function getPublicBaseUrl(req) {
+  const host = req.get('host');
+  const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+  return `${protocol}://${host}`;
+}
+
+function shouldProxyStream(stream) {
+  try {
+    const url = new URL(stream.url);
+    const title = (stream.title || '').toLowerCase();
+    return url.hostname.toLowerCase().includes('mediafire.com')
+      || title.includes('premium');
+  } catch {
+    return false;
+  }
+}
+
+function wrapProxyStreams(streams, req) {
+  const baseUrl = getPublicBaseUrl(req);
+
+  return streams.map((stream) => {
+    if (!stream?.url || !shouldProxyStream(stream)) {
+      return stream;
+    }
+
+    const proxiedUrl = `${baseUrl}/proxy/stream?url=${encodeURIComponent(stream.url)}&referer=${encodeURIComponent(stream?.behaviorHints?.proxyHeaders?.request?.Referer || '')}`;
+
+    return {
+      ...stream,
+      url: proxiedUrl,
+      behaviorHints: {
+        ...(stream.behaviorHints || {}),
+        proxyHeaders: {
+          request: {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          }
+        }
+      }
+    };
+  });
+}
+
 // 1. Manifest Endpoint
 app.get('/manifest.json', (req, res) => {
   res.json(manifest);
+});
+
+app.get('/proxy/stream', async (req, res) => {
+  const targetUrl = req.query.url;
+  const referer = req.query.referer || 'https://sololatino.net/';
+
+  if (!targetUrl || typeof targetUrl !== 'string') {
+    return res.status(400).send('Missing url');
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(targetUrl);
+  } catch {
+    return res.status(400).send('Invalid url');
+  }
+
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    return res.status(400).send('Invalid protocol');
+  }
+
+  try {
+    const headers = {
+      'User-Agent': req.get('user-agent') || 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Referer': referer
+    };
+
+    const range = req.get('range');
+    if (range) {
+      headers.Range = range;
+    }
+
+    const upstream = await fetch(targetUrl, {
+      headers
+    });
+
+    res.status(upstream.status);
+
+    const contentLength = upstream.headers.get('content-length');
+    const contentRange = upstream.headers.get('content-range');
+    const acceptRanges = upstream.headers.get('accept-ranges');
+
+    res.setHeader('Content-Type', 'video/mp4');
+    res.setHeader('Content-Disposition', 'inline; filename="stream.mp4"');
+    if (contentLength) res.setHeader('Content-Length', contentLength);
+    if (contentRange) res.setHeader('Content-Range', contentRange);
+    if (acceptRanges) res.setHeader('Accept-Ranges', acceptRanges);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+
+    if (!upstream.body) {
+      return res.end();
+    }
+
+    const reader = upstream.body.getReader();
+
+    async function pump() {
+      const { done, value } = await reader.read();
+      if (done) {
+        res.end();
+        return;
+      }
+      res.write(Buffer.from(value));
+      await pump();
+    }
+
+    await pump();
+  } catch (error) {
+    console.error('Proxy Stream Error:', error.message);
+    res.status(502).send('Proxy error');
+  }
 });
 
 // 2. Stream Endpoint
@@ -63,9 +175,10 @@ app.get('/stream/:type/:id.json', async (req, res) => {
 
   try {
     const streams = await scrapers.getStreams(type, cleanId, season, episode);
+    const responseStreams = wrapProxyStreams(streams || [], req);
     
     // If no streams found, return empty array (Stremio format)
-    res.json({ streams: streams || [] });
+    res.json({ streams: responseStreams });
   } catch (error) {
     console.error('Stream Route Error:', error.message);
     res.json({ streams: [] });
