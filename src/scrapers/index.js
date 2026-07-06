@@ -10,6 +10,7 @@ const cinehdplus = require('./cinehdplus');
  */
 async function getStreams(type, id, season, episode) {
   let title = '';
+  let originalTitle = '';
   let year = null;
   let tmdbId = '';
   let imdbId = '';
@@ -23,6 +24,7 @@ async function getStreams(type, id, season, episode) {
       const meta = await tmdb.getMetaDetails(type, tmdbId);
       if (meta) {
         title = meta.name;
+        originalTitle = meta.originalTitle;
         year = meta.releaseInfo ? parseInt(meta.releaseInfo) : null;
         imdbId = meta.imdb_id;
       }
@@ -34,6 +36,7 @@ async function getStreams(type, id, season, episode) {
       const details = await tmdb.findByImdbId(imdbId);
       if (details) {
         title = details.title;
+        originalTitle = details.originalTitle;
         year = details.year;
         tmdbId = details.id;
       }
@@ -42,6 +45,7 @@ async function getStreams(type, id, season, episode) {
       const meta = await tmdb.getMetaDetails(type, id);
       if (meta) {
         title = meta.name;
+        originalTitle = meta.originalTitle;
         year = meta.releaseInfo ? parseInt(meta.releaseInfo) : null;
         imdbId = meta.imdb_id;
       }
@@ -56,10 +60,10 @@ async function getStreams(type, id, season, episode) {
 
     // 2. Invoke scrapers in parallel
     const scraperPromises = [
-      sololatino.scrape(title, year, type, season, episode),
-      cinecalidad.scrape(title, year, type, season, episode),
-      tioplus.scrape(title, year, type, season, episode),
-      cinehdplus.scrape(title, year, type, season, episode)
+      sololatino.scrape(title, originalTitle, year, type, season, episode),
+      cinecalidad.scrape(title, originalTitle, year, type, season, episode),
+      tioplus.scrape(title, originalTitle, year, type, season, episode),
+      cinehdplus.scrape(title, originalTitle, year, type, season, episode)
     ];
 
     const results = await Promise.allSettled(scraperPromises);

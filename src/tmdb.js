@@ -126,12 +126,14 @@ async function getMetaDetails(type, tmdbId) {
 
     const imdbId = data.external_ids?.imdb_id || null;
     const name = data.title || data.name || data.original_title || data.original_name;
+    const originalTitle = data.original_title || data.original_name;
     const year = (data.release_date || data.first_air_date || '').substring(0, 4);
 
     const meta = {
       id: `tmdb:${type}:${tmdbId}`,
       type,
       name,
+      originalTitle,
       description: data.overview || '',
       poster: data.poster_path ? `https://image.tmdb.org/t/p/w500${data.poster_path}` : null,
       background: data.backdrop_path ? `https://image.tmdb.org/t/p/original${data.backdrop_path}` : null,

@@ -31,52 +31,48 @@ function utf8_to_b64(str) {
 /**
  * TioPlus Scraper
  */
-async function scrape(title, year, type, season, episode) {
+async function scrape(title, originalTitle, year, type, season, episode) {
   const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-  const searchUrl = `https://tioplus.app/api/search/${encodeURIComponent(title)}`;
 
-  try {
-    // 1. Search for the content via API
+  async function performSearch(searchQuery) {
+    const searchUrl = `https://tioplus.app/api/search/${encodeURIComponent(searchQuery)}`;
     const res = await fetch(searchUrl, {
       headers: {
         'User-Agent': userAgent,
         'x-requested-with': 'XMLHttpRequest'
       }
     });
-    if (!res.ok) {
-      console.warn(`TioPlus search returned status ${res.status}`);
-      return [];
-    }
+    console.log(`TioPlus search HTTP status for ${searchQuery}:`, res.status);
+    if (!res.ok) return [];
 
     const html = await res.text();
     const $ = cheerio.load(html);
     const results = [];
 
-    // Extract links matching /pelicula/ or /serie/
     $('a').each((i, el) => {
       const href = $(el).attr('href') || '';
       const text = $(el).text().trim().replace(/\s+/g, ' ');
-
       const isMovieLink = href.includes('/pelicula/');
       const isSeriesLink = href.includes('/serie/');
 
       if (href && (isMovieLink || isSeriesLink)) {
         if ((type === 'movie' && isMovieLink) || (type === 'series' && isSeriesLink)) {
-          results.push({
-            url: href,
-            title: text
-          });
+          results.push({ url: href, title: text });
         }
       }
     });
+    console.log(`TioPlus performSearch("${searchQuery}") found:`, results);
 
-    // Find the best match
     const cleanTargetTitle = cleanText(title);
+    const cleanOriginalTitle = cleanText(originalTitle);
     let bestMatch = null;
 
     for (const r of results) {
       const cleanResultTitle = cleanText(r.title);
-      if (cleanResultTitle.includes(cleanTargetTitle) || cleanTargetTitle.includes(cleanResultTitle)) {
+      const matchesTitle = cleanTargetTitle && (cleanResultTitle.includes(cleanTargetTitle) || cleanTargetTitle.includes(cleanResultTitle));
+      const matchesOriginal = cleanOriginalTitle && (cleanResultTitle.includes(cleanOriginalTitle) || cleanOriginalTitle.includes(cleanResultTitle));
+      
+      if (matchesTitle || matchesOriginal) {
         if (year) {
           const hasYear = r.title.includes(year.toString()) || cleanResultTitle.includes(year.toString());
           if (hasYear) {
@@ -90,6 +86,16 @@ async function scrape(title, year, type, season, episode) {
 
     if (!bestMatch && results.length > 0) {
       bestMatch = results[0];
+    }
+    return bestMatch;
+  }
+
+  try {
+    let bestMatch = await performSearch(title);
+
+    if (!bestMatch && originalTitle && cleanText(originalTitle) !== cleanText(title)) {
+      console.log(`TioPlus: No match for "${title}", trying originalTitle "${originalTitle}"`);
+      bestMatch = await performSearch(originalTitle);
     }
 
     if (!bestMatch) {

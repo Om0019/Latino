@@ -13,46 +13,38 @@ function cleanText(str) {
 /**
  * Cinecalidad Scraper (Direct Streams)
  */
-async function scrape(title, year, type, season, episode) {
-  // Cinecalidad primarily hosts movies. Skip series.
-  if (type !== 'movie') {
-    return [];
-  }
-
-  const searchUrl = `https://www.cinecalidad.am/?s=${encodeURIComponent(title)}`;
+async function scrape(title, originalTitle, year, type, season, episode) {
   const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
-  try {
+  async function performSearch(searchQuery) {
+    const searchUrl = `https://www.cinecalidad.am/?s=${encodeURIComponent(searchQuery)}`;
     const res = await fetch(searchUrl, {
       headers: { 'User-Agent': userAgent }
     });
-    if (!res.ok) {
-      console.warn(`Cinecalidad search returned status ${res.status}`);
-      return [];
-    }
+    if (!res.ok) return [];
 
     const html = await res.text();
     const $ = cheerio.load(html);
     const results = [];
 
-    // Extract all movie links from the search results
     $('a').each((i, el) => {
       const href = $(el).attr('href');
       const text = $(el).text().trim();
       const titleAttr = $(el).attr('title') || '';
       
-      if (href && (href.includes('/ver-pelicula/') || href.includes('/pelicula/'))) {
-        const fullTitle = titleAttr || text;
-        if (fullTitle) {
-          results.push({
-            url: href,
-            title: fullTitle
-          });
+      const isMovieLink = href.includes('/ver-pelicula/') || href.includes('/pelicula/');
+      const isSeriesLink = href.includes('/ver-serie/') || href.includes('/serie/');
+
+      if (href && (isMovieLink || isSeriesLink)) {
+        if ((type === 'movie' && isMovieLink) || (type === 'series' && isSeriesLink)) {
+          const fullTitle = titleAttr || text;
+          if (fullTitle) {
+            results.push({ url: href, title: fullTitle });
+          }
         }
       }
     });
 
-    // Remove duplicates
     const uniqueResults = [];
     const seenUrls = new Set();
     for (const r of results) {
@@ -62,13 +54,16 @@ async function scrape(title, year, type, season, episode) {
       }
     }
 
-    // Find the best match
     const cleanTargetTitle = cleanText(title);
+    const cleanOriginalTitle = cleanText(originalTitle);
     let bestMatch = null;
 
     for (const r of uniqueResults) {
       const cleanResultTitle = cleanText(r.title);
-      if (cleanResultTitle.includes(cleanTargetTitle) || cleanTargetTitle.includes(cleanResultTitle)) {
+      const matchesTitle = cleanTargetTitle && (cleanResultTitle.includes(cleanTargetTitle) || cleanTargetTitle.includes(cleanResultTitle));
+      const matchesOriginal = cleanOriginalTitle && (cleanResultTitle.includes(cleanOriginalTitle) || cleanOriginalTitle.includes(cleanResultTitle));
+      
+      if (matchesTitle || matchesOriginal) {
         if (year) {
           const hasYear = r.title.includes(year.toString()) || cleanResultTitle.includes(year.toString());
           if (hasYear) {
@@ -83,16 +78,35 @@ async function scrape(title, year, type, season, episode) {
     if (!bestMatch && uniqueResults.length > 0) {
       bestMatch = uniqueResults[0];
     }
+    return bestMatch;
+  }
+
+  try {
+    let bestMatch = await performSearch(title);
+
+    if (!bestMatch && originalTitle && cleanText(originalTitle) !== cleanText(title)) {
+      console.log(`Cinecalidad: No match for "${title}", trying originalTitle "${originalTitle}"`);
+      bestMatch = await performSearch(originalTitle);
+    }
 
     if (!bestMatch) {
-      console.log(`Cinecalidad: No matching movie found for "${title}"`);
+      console.log(`Cinecalidad: No matching content found for "${title}"`);
       return [];
     }
 
-    console.log(`Cinecalidad: Matched movie page: ${bestMatch.title} (${bestMatch.url})`);
+    let targetPageUrl = bestMatch.url;
+    if (type === 'series') {
+      const match = targetPageUrl.match(/\/ver-serie\/([^\/]+)/) || targetPageUrl.match(/\/serie\/([^\/]+)/);
+      if (match && match[1]) {
+        const slug = match[1];
+        targetPageUrl = `https://www.cinecalidad.am/ver-el-episodio/${slug}-${season}x${episode}/`;
+      }
+    }
+
+    console.log(`Cinecalidad: Matched target page: ${bestMatch.title} (${targetPageUrl})`);
 
     // Fetch movie page to get player tabs
-    const movieRes = await fetch(bestMatch.url, {
+    const movieRes = await fetch(targetPageUrl, {
       headers: { 'User-Agent': userAgent }
     });
     if (!movieRes.ok) return [];
@@ -127,7 +141,7 @@ async function scrape(title, year, type, season, episode) {
     // Concurrently fetch player pages and extract direct video streams
     const playerPromises = playerOptions.map(async (opt) => {
       try {
-        const directUrl = await unpacker.resolvePlayerStream(opt.playerUrl, userAgent, bestMatch.url);
+        const directUrl = await unpacker.resolvePlayerStream(opt.playerUrl, userAgent, targetPageUrl);
 
         if (directUrl) {
           const streamObj = {

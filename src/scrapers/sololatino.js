@@ -13,44 +13,33 @@ function cleanText(str) {
 /**
  * SoloLatino Scraper
  */
-async function scrape(title, year, type, season, episode) {
+async function scrape(title, originalTitle, year, type, season, episode) {
   const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-  const searchUrl = `https://sololatino.net/buscar?q=${encodeURIComponent(title)}`;
 
-  try {
-    // 1. Search for the content
+  async function performSearch(searchQuery) {
+    const searchUrl = `https://sololatino.net/buscar?q=${encodeURIComponent(searchQuery)}`;
     const res = await fetch(searchUrl, {
       headers: { 'User-Agent': userAgent }
     });
-    if (!res.ok) {
-      console.warn(`SoloLatino search returned status ${res.status}`);
-      return [];
-    }
+    if (!res.ok) return [];
 
     const html = await res.text();
     const $ = cheerio.load(html);
     const results = [];
 
-    // Extract links matching /pelicula/ or /serie/
     $('a').each((i, el) => {
       const href = $(el).attr('href') || '';
       const text = $(el).text().trim().replace(/\s+/g, ' ');
-      
       const isMovieLink = href.includes('/pelicula/');
       const isSeriesLink = href.includes('/serie/');
 
       if (href && (isMovieLink || isSeriesLink)) {
-        // Only collect links that match the requested type
         if ((type === 'movie' && isMovieLink) || (type === 'series' && isSeriesLink)) {
-          results.push({
-            url: href,
-            title: text
-          });
+          results.push({ url: href, title: text });
         }
       }
     });
 
-    // Remove duplicates
     const uniqueResults = [];
     const seenUrls = new Set();
     for (const r of results) {
@@ -60,13 +49,16 @@ async function scrape(title, year, type, season, episode) {
       }
     }
 
-    // Find the best match
     const cleanTargetTitle = cleanText(title);
+    const cleanOriginalTitle = cleanText(originalTitle);
     let bestMatch = null;
 
     for (const r of uniqueResults) {
       const cleanResultTitle = cleanText(r.title);
-      if (cleanResultTitle.includes(cleanTargetTitle) || cleanTargetTitle.includes(cleanResultTitle)) {
+      const matchesTitle = cleanTargetTitle && (cleanResultTitle.includes(cleanTargetTitle) || cleanTargetTitle.includes(cleanResultTitle));
+      const matchesOriginal = cleanOriginalTitle && (cleanResultTitle.includes(cleanOriginalTitle) || cleanOriginalTitle.includes(cleanResultTitle));
+      
+      if (matchesTitle || matchesOriginal) {
         if (year) {
           const hasYear = r.title.includes(year.toString()) || cleanResultTitle.includes(year.toString());
           if (hasYear) {
@@ -80,6 +72,16 @@ async function scrape(title, year, type, season, episode) {
 
     if (!bestMatch && uniqueResults.length > 0) {
       bestMatch = uniqueResults[0];
+    }
+    return bestMatch;
+  }
+
+  try {
+    let bestMatch = await performSearch(title);
+
+    if (!bestMatch && originalTitle && cleanText(originalTitle) !== cleanText(title)) {
+      console.log(`SoloLatino: No match for "${title}", trying originalTitle "${originalTitle}"`);
+      bestMatch = await performSearch(originalTitle);
     }
 
     if (!bestMatch) {
@@ -260,6 +262,9 @@ async function scrape(title, year, type, season, episode) {
                                 directUrl = redirectCheck.headers.get('location');
                               } else {
                                 directUrl = pathUrl;
+                              }
+                              if (directUrl && directUrl.includes('.bin')) {
+                                directUrl += '#.mp4';
                               }
                             }
                           }
