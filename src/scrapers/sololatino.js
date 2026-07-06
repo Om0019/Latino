@@ -1,5 +1,6 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
+const TOKEN_CONCURRENCY = 2;
 
 function cleanText(str) {
   if (!str) return '';
@@ -8,6 +9,57 @@ function cleanText(str) {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9]/g, '');
+}
+
+function slugifyTitle(str) {
+  if (!str) return '';
+  return str
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/&/g, ' y ')
+    .replace(/\band\b/g, 'y')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function buildFallbackUrls(type, title, originalTitle) {
+  const basePath = type === 'series' ? 'serie' : 'pelicula';
+  const candidates = [];
+  const seen = new Set();
+
+  for (const value of [title, originalTitle]) {
+    const slug = slugifyTitle(value);
+    if (!slug || seen.has(slug)) continue;
+    seen.add(slug);
+    candidates.push({
+      url: `https://sololatino.net/${basePath}/${slug}`,
+      title: value || slug
+    });
+  }
+
+  return candidates;
+}
+
+async function mapWithConcurrency(items, concurrency, worker) {
+  const results = [];
+  let index = 0;
+
+  async function runNext() {
+    while (index < items.length) {
+      const currentIndex = index++;
+      const result = await worker(items[currentIndex], currentIndex);
+      if (result) {
+        results.push(result);
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, () => runNext())
+  );
+
+  return results;
 }
 
 /**
@@ -43,6 +95,10 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     const uniqueResults = [];
     const seenUrls = new Set();
     for (const r of results) {
+      if (r.url.includes('/serie/') && !/\/serie\/[^/]+\/?$/.test(r.url)) {
+        continue;
+      }
+
       if (!seenUrls.has(r.url)) {
         seenUrls.add(r.url);
         uniqueResults.push(r);
@@ -73,6 +129,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     if (!bestMatch && uniqueResults.length > 0) {
       bestMatch = uniqueResults[0];
     }
+
     return bestMatch;
   }
 
@@ -82,6 +139,23 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     if (!bestMatch && originalTitle && cleanText(originalTitle) !== cleanText(title)) {
       console.log(`SoloLatino: No match for "${title}", trying originalTitle "${originalTitle}"`);
       bestMatch = await performSearch(originalTitle);
+    }
+
+    if (!bestMatch) {
+      for (const candidate of buildFallbackUrls(type, title, originalTitle)) {
+        try {
+          const probeRes = await fetch(candidate.url, {
+            headers: { 'User-Agent': userAgent }
+          });
+          if (probeRes.ok) {
+            console.log(`SoloLatino: Using direct URL fallback ${candidate.url}`);
+            bestMatch = candidate;
+            break;
+          }
+        } catch (err) {
+          console.warn(`SoloLatino: Fallback probe failed for ${candidate.url}:`, err.message);
+        }
+      }
     }
 
     if (!bestMatch) {
@@ -167,10 +241,8 @@ async function scrape(title, originalTitle, year, type, season, episode) {
 
     console.log(`SoloLatino: Found ${playerTokens.length} player tokens`);
 
-    const streams = [];
-
     // 4. Query the /api/player-url endpoint for each token
-    for (const pInfo of playerTokens) {
+    const streams = await mapWithConcurrency(playerTokens, TOKEN_CONCURRENCY, async (pInfo) => {
       try {
         const apiRes = await fetch('https://sololatino.net/api/player-url', {
           method: 'POST',
@@ -285,7 +357,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
 
 
             if (directUrl) {
-              const streamObj = {
+              return {
                 name: `SoloLatino`,
                 title: `🇲🇽 ${pInfo.name}`,
                 url: directUrl,
@@ -299,7 +371,6 @@ async function scrape(title, originalTitle, year, type, season, episode) {
                   }
                 }
               };
-              streams.push(streamObj);
             }
           }
         } else {
@@ -308,7 +379,8 @@ async function scrape(title, originalTitle, year, type, season, episode) {
       } catch (err) {
         console.error(`SoloLatino: Error requesting player URL for server ${pInfo.name}:`, err.message);
       }
-    }
+      return null;
+    });
 
     return streams;
   } catch (error) {

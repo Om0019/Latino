@@ -230,6 +230,16 @@ module.exports.decryptEmbed69 = decryptEmbed69;
  */
 async function resolvePlayerStream(url, userAgent, referer) {
     try {
+        // Netu/Waaw "f" pages usually wrap the actual embed page.
+        if (url.includes('waaw.to/f/')) {
+            const waawUrl = new URL(url);
+            const match = waawUrl.pathname.match(/\/f\/([^/?#]+)/);
+            if (match && match[1]) {
+                const embedUrl = `https://waaw.to/e/${match[1]}?http_referer=${encodeURIComponent(referer || 'https://tioplus.app/')}`;
+                return await resolvePlayerStream(embedUrl, userAgent, referer);
+            }
+        }
+
         // Pelisplus SPA players (upns, 4meplayer, strp2p)
         if (url.includes('pelisplus.upns.pro') || url.includes('4meplayer.pro') || url.includes('strp2p.com')) {
             const m3u8 = await resolvePelisplus(url, userAgent, referer);

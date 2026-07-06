@@ -1,5 +1,6 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
+const TOKEN_CONCURRENCY = 4;
 
 function cleanText(str) {
   if (!str) return '';
@@ -8,6 +9,57 @@ function cleanText(str) {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9]/g, '');
+}
+
+function slugifyTitle(str) {
+  if (!str) return '';
+  return str
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/&/g, ' and ')
+    .replace(/\by\b/g, 'and')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function buildFallbackUrls(type, title, originalTitle) {
+  const basePath = type === 'series' ? 'serie' : 'pelicula';
+  const candidates = [];
+  const seen = new Set();
+
+  for (const value of [title, originalTitle]) {
+    const slug = slugifyTitle(value);
+    if (!slug || seen.has(slug)) continue;
+    seen.add(slug);
+    candidates.push({
+      url: `https://tioplus.app/${basePath}/${slug}`,
+      title: value || slug
+    });
+  }
+
+  return candidates;
+}
+
+async function mapWithConcurrency(items, concurrency, worker) {
+  const results = [];
+  let index = 0;
+
+  async function runNext() {
+    while (index < items.length) {
+      const currentIndex = index++;
+      const result = await worker(items[currentIndex], currentIndex);
+      if (result) {
+        results.push(result);
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, () => runNext())
+  );
+
+  return results;
 }
 
 /**
@@ -99,6 +151,23 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     }
 
     if (!bestMatch) {
+      for (const candidate of buildFallbackUrls(type, title, originalTitle)) {
+        try {
+          const probeRes = await fetch(candidate.url, {
+            headers: { 'User-Agent': userAgent }
+          });
+          if (probeRes.ok) {
+            console.log(`TioPlus: Using direct URL fallback ${candidate.url}`);
+            bestMatch = candidate;
+            break;
+          }
+        } catch (err) {
+          console.warn(`TioPlus: Fallback probe failed for ${candidate.url}:`, err.message);
+        }
+      }
+    }
+
+    if (!bestMatch) {
       console.log(`TioPlus: No matching content found for "${title}"`);
       return [];
     }
@@ -148,13 +217,11 @@ async function scrape(title, originalTitle, year, type, season, episode) {
 
     console.log(`TioPlus: Found ${serverTokens.length} server tokens`);
 
-    const streams = [];
-
     // 3. For each token, resolve player redirect
-    for (const sInfo of serverTokens) {
+    const streams = await mapWithConcurrency(serverTokens, TOKEN_CONCURRENCY, async (sInfo) => {
       try {
         const ol = b64_to_utf8(sInfo.token);
-        if (!ol) continue;
+        if (!ol) return null;
 
         // Shortcut: if the decoded token is a pelisplus or emturbovid URL,
         // resolve it directly without going through the obfuscated tioplus player page
@@ -177,7 +244,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
               'Referer': 'https://tioplus.app/'
             }
           });
-          if (!playerRes.ok) continue;
+          if (!playerRes.ok) return null;
 
           const playerHtml = await playerRes.text();
 
@@ -188,7 +255,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
           }
         }
 
-        if (!directStreamUrl) continue;
+        if (!directStreamUrl) return null;
           
         let resolvedDirectUrl = null;
         try {
@@ -198,7 +265,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
         }
 
         if (resolvedDirectUrl) {
-          const streamObj = {
+          return {
             name: `TioPlus`,
             title: `🇲🇽 ${sInfo.name}`,
             url: resolvedDirectUrl,
@@ -212,12 +279,12 @@ async function scrape(title, originalTitle, year, type, season, episode) {
               }
             }
           };
-          streams.push(streamObj);
         }
       } catch (err) {
         console.error(`TioPlus: Error resolving player token for ${sInfo.name}:`, err.message);
       }
-    }
+      return null;
+    });
 
     return streams;
   } catch (error) {

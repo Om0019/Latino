@@ -116,8 +116,9 @@ async function searchCatalog(type, query, page = 1) {
 /**
  * Gets detailed metadata for an item to respond to /meta.
  */
-async function getMetaDetails(type, tmdbId) {
+async function getMetaDetails(type, tmdbId, options = {}) {
   const tmdbType = type === 'series' ? 'tv' : 'movie';
+  const { includeEpisodes = true } = options;
   try {
     const data = await fetchFromTMDB(`/${tmdbType}/${tmdbId}`, {
       language: 'es-MX',
@@ -146,7 +147,7 @@ async function getMetaDetails(type, tmdbId) {
       runtime: data.runtime ? `${data.runtime} min` : null
     };
 
-    if (type === 'series' && data.seasons) {
+    if (includeEpisodes && type === 'series' && data.seasons) {
       // Add episodes structure for series
       meta.videos = [];
       for (const season of data.seasons) {

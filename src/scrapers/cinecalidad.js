@@ -10,6 +10,15 @@ function cleanText(str) {
     .replace(/[^a-z0-9]/g, '');
 }
 
+function extractSeriesSlug(url) {
+  const match = url.match(/\/(?:ver-serie|serie)\/([^/]+)/);
+  return match?.[1] || null;
+}
+
+function buildEpisodeUrlFromSeriesSlug(slug, season, episode) {
+  return `https://www.cinecalidad.am/ver-el-episodio/${slug}-${season}x${episode}/`;
+}
+
 /**
  * Cinecalidad Scraper (Direct Streams)
  */
@@ -48,6 +57,10 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     const uniqueResults = [];
     const seenUrls = new Set();
     for (const r of results) {
+      if (type === 'series' && !extractSeriesSlug(r.url)) {
+        continue;
+      }
+
       if (!seenUrls.has(r.url)) {
         seenUrls.add(r.url);
         uniqueResults.push(r);
@@ -57,26 +70,33 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     const cleanTargetTitle = cleanText(title);
     const cleanOriginalTitle = cleanText(originalTitle);
     let bestMatch = null;
+    let bestScore = -1;
 
     for (const r of uniqueResults) {
       const cleanResultTitle = cleanText(r.title);
+      const slug = extractSeriesSlug(r.url) || '';
+      const cleanSlug = cleanText(slug.replace(/-/g, ' '));
       const matchesTitle = cleanTargetTitle && (cleanResultTitle.includes(cleanTargetTitle) || cleanTargetTitle.includes(cleanResultTitle));
       const matchesOriginal = cleanOriginalTitle && (cleanResultTitle.includes(cleanOriginalTitle) || cleanOriginalTitle.includes(cleanResultTitle));
-      
-      if (matchesTitle || matchesOriginal) {
-        if (year) {
-          const hasYear = r.title.includes(year.toString()) || cleanResultTitle.includes(year.toString());
-          if (hasYear) {
-            bestMatch = r;
-            break;
-          }
-        }
-        bestMatch = r;
-      }
-    }
 
-    if (!bestMatch && uniqueResults.length > 0) {
-      bestMatch = uniqueResults[0];
+      if (matchesTitle || matchesOriginal || cleanSlug === cleanTargetTitle || cleanSlug === cleanOriginalTitle) {
+        let score = 0;
+
+        if (matchesTitle) score += 3;
+        if (matchesOriginal) score += 2;
+        if (cleanSlug === cleanTargetTitle || cleanSlug === cleanOriginalTitle) score += 4;
+        if (cleanResultTitle === cleanTargetTitle || cleanResultTitle === cleanOriginalTitle) score += 3;
+
+        if (year) {
+          const hasYear = r.title.includes(year.toString()) || cleanResultTitle.includes(year.toString()) || cleanSlug.includes(year.toString());
+          if (hasYear) score += 2;
+        }
+
+        if (score > bestScore) {
+          bestScore = score;
+          bestMatch = r;
+        }
+      }
     }
     return bestMatch;
   }
@@ -96,11 +116,12 @@ async function scrape(title, originalTitle, year, type, season, episode) {
 
     let targetPageUrl = bestMatch.url;
     if (type === 'series') {
-      const match = targetPageUrl.match(/\/ver-serie\/([^\/]+)/) || targetPageUrl.match(/\/serie\/([^\/]+)/);
-      if (match && match[1]) {
-        const slug = match[1];
-        targetPageUrl = `https://www.cinecalidad.am/ver-el-episodio/${slug}-${season}x${episode}/`;
+      const slug = extractSeriesSlug(targetPageUrl);
+      if (!slug) {
+        console.log(`Cinecalidad: Could not extract a series slug for "${title}"`);
+        return [];
       }
+      targetPageUrl = buildEpisodeUrlFromSeriesSlug(slug, season, episode);
     }
 
     console.log(`Cinecalidad: Matched target page: ${bestMatch.title} (${targetPageUrl})`);
