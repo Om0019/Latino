@@ -15,7 +15,7 @@ const manifest = {
   id: 'com.latino.spanish',
   version: '1.0.0',
   name: 'Latino 🇲🇽',
-  description: 'Películas y Series en Español Latino y Castellano directas de Cinecalidad, SoloLatino, TioPlus y CineHDPlus.',
+  description: 'Películas y Series en Español Latino y Castellano directas de Cinecalidad, SoloLatino, TioPlus, Cuevana3i y CineHDPlus.',
   logo: 'https://images.unsplash.com/photo-1574267431422-7bda297781f5?q=80&w=256&auto=format&fit=crop',
   background: 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?q=80&w=1280&auto=format&fit=crop',
   types: ['movie', 'series'],

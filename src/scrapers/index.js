@@ -3,6 +3,7 @@ const sololatino = require('./sololatino');
 const cinecalidad = require('./cinecalidad');
 const tioplus = require('./tioplus');
 const cinehdplus = require('./cinehdplus');
+const cuevana3i = require('./cuevana3i');
 
 const SCRAPER_TIMEOUT_MS = 6500;
 const STREAM_VERIFICATION_TIMEOUT_MS = 1200;
@@ -109,7 +110,8 @@ async function getStreams(type, id, season, episode) {
     const scraperPromises = [
       withTimeout(sololatino.scrape(title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, 'SoloLatino'),
       withTimeout(cinecalidad.scrape(title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, 'Cinecalidad'),
-      withTimeout(tioplus.scrape(title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, 'TioPlus')
+      withTimeout(tioplus.scrape(title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, 'TioPlus'),
+      withTimeout(cuevana3i.scrape(title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, 'Cuevana3i')
     ];
 
     if (ENABLE_CINEHDPLUS) {
@@ -123,8 +125,8 @@ async function getStreams(type, id, season, episode) {
 
     results.forEach((res, index) => {
       const scraperNames = ENABLE_CINEHDPLUS
-        ? ['SoloLatino', 'Cinecalidad', 'TioPlus', 'CineHDPlus']
-        : ['SoloLatino', 'Cinecalidad', 'TioPlus'];
+        ? ['SoloLatino', 'Cinecalidad', 'TioPlus', 'Cuevana3i', 'CineHDPlus']
+        : ['SoloLatino', 'Cinecalidad', 'TioPlus', 'Cuevana3i'];
       const name = scraperNames[index];
       
       if (res.status === 'fulfilled') {
