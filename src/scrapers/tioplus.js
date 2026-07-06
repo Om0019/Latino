@@ -150,52 +150,68 @@ async function scrape(title, year, type, season, episode) {
         const ol = b64_to_utf8(sInfo.token);
         if (!ol) continue;
 
-        // Double base64 encode
-        const innerPath = utf8_to_b64(utf8_to_b64(ol));
-        const playerUrl = `https://tioplus.app/player/${innerPath}`;
+        // Shortcut: if the decoded token is a pelisplus or emturbovid URL,
+        // resolve it directly without going through the obfuscated tioplus player page
+        const isPelisplus = ol.includes('pelisplus.upns.pro') || ol.includes('4meplayer.pro') || ol.includes('strp2p.com');
+        const isEmturbovid = ol.includes('emturbovid') || ol.includes('turbovidhls') || ol.includes('turboviplay');
 
-        // Fetch player page
-        const playerRes = await fetch(playerUrl, {
-          headers: {
-            'User-Agent': userAgent,
-            'Referer': 'https://tioplus.app/'
-          }
-        });
-        if (!playerRes.ok) continue;
+        let directStreamUrl = null;
 
-        const playerHtml = await playerRes.text();
+        if (isPelisplus || isEmturbovid) {
+          directStreamUrl = ol; // resolve directly below
+        } else {
+          // Double base64 encode for the tioplus player page
+          const innerPath = utf8_to_b64(utf8_to_b64(ol));
+          const playerUrl = `https://tioplus.app/player/${innerPath}`;
 
-        // Extract redirect URL using Regex
-        const redirectMatch = playerHtml.match(/window\.location\.href\s*=\s*['"]([^'"]+)['"]/);
-        if (redirectMatch && redirectMatch[1]) {
-          const directStreamUrl = redirectMatch[1];
-          
-          let resolvedDirectUrl = null;
-          try {
-            resolvedDirectUrl = await unpacker.resolvePlayerStream(directStreamUrl, userAgent, 'https://sololatino.net/');
-          } catch (e) {
-            console.error(`TioPlus: Error resolving hosting redirect for ${sInfo.name}:`, e.message);
-          }
+          // Fetch player page
+          const playerRes = await fetch(playerUrl, {
+            headers: {
+              'User-Agent': userAgent,
+              'Referer': 'https://tioplus.app/'
+            }
+          });
+          if (!playerRes.ok) continue;
 
-          const streamObj = {
-            name: `Flava 📺 TioPlus`,
-            title: `TioPlus 🇪🇸 [Latino]\nServer: ${sInfo.name}\nDirect HLS Play Stream`
-          };
+          const playerHtml = await playerRes.text();
 
-          if (resolvedDirectUrl) {
-            streamObj.url = resolvedDirectUrl;
-            streamObj.behaviorHints = {
-              notWebReady: true,
-              proxyHeaders: {
-                request: {
-                  "User-Agent": userAgent,
-                  "Referer": directStreamUrl || "https://tioplus.app/"
-                }
-              }
-            };
-            streams.push(streamObj);
+          // Extract redirect URL using Regex
+          const redirectMatch = playerHtml.match(/window\.location\.href\s*=\s*['"]([^'"]+)['"]/);
+          if (redirectMatch && redirectMatch[1]) {
+            directStreamUrl = redirectMatch[1];
           }
         }
+
+        if (!directStreamUrl) continue;
+          
+        let resolvedDirectUrl = null;
+        try {
+          resolvedDirectUrl = await unpacker.resolvePlayerStream(directStreamUrl, userAgent, 'https://tioplus.app/');
+        } catch (e) {
+          console.error(`TioPlus: Error resolving hosting redirect for ${sInfo.name}:`, e.message);
+        }
+
+        const streamObj = {
+          name: `Flava 📺 TioPlus`,
+          title: `TioPlus 🇪🇸 [Latino]\nServer: ${sInfo.name}\nDirect HLS Play Stream`
+        };
+
+        if (resolvedDirectUrl) {
+          streamObj.url = resolvedDirectUrl;
+          streamObj.behaviorHints = {
+            notWebReady: true,
+            proxyHeaders: {
+              request: {
+                "User-Agent": userAgent,
+                "Referer": directStreamUrl || "https://tioplus.app/"
+              }
+            }
+          };
+        } else {
+          streamObj.externalUrl = directStreamUrl;
+          streamObj.title = `TioPlus 🇪🇸 [Latino]\nServer: ${sInfo.name}\nExternal Web Player (Fallback)`;
+        }
+        streams.push(streamObj);
       } catch (err) {
         console.error(`TioPlus: Error resolving player token for ${sInfo.name}:`, err.message);
       }

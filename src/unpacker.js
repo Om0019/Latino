@@ -70,6 +70,100 @@ module.exports = { extractDirectStream, unpack };
 
 const crypto = require('crypto');
 
+/**
+ * Pelisplus AES decryptor.
+ * Servers like pelisplus.upns.pro, pelisplusto.4meplayer.pro, pelisplus.strp2p.com
+ * all encrypt their /api/v1/video?id=<hash> API responses with a static AES-128-CBC key.
+ * The key is derived from the S() function in their JS bundle (always uses firstChar='t').
+ * The IV is derived from the _() function (always the same on HTTPS).
+ */
+function _buildPelisplusKeyAndIV() {
+  function m(...args) { return String.fromCharCode(...args); }
+  function p(str, n) { return str.charCodeAt(n) || 0; }
+  
+  // S() with firstChar='t' (static)
+  const v = '#t';
+  const P = '10'; const O = 110; const G = 1;
+  let N = '';
+  const B = '\u1d5f'.charCodeAt(0).toString().split(''); // '7519'
+  for (let ye = 0; ye < B.length; ye++) N += m(parseInt(P + B[ye]));
+  N += m(p(v, 1));
+  N += N.substring(1, 3);
+  N += m(O, O - 1, O + 7);
+  const oe = '3579'.split('');
+  N += m(oe[3] + oe[2], oe[1] + oe[2]);
+  const val1 = oe[0] * G + G + oe[3];
+  N += m(val1, val1);
+  const val2 = oe[3] * P + oe[3] * G;
+  oe.reverse();
+  const val3 = parseInt(oe.join('').substring(0, 2));
+  N += m(val2, val3);
+  const key = Buffer.from(N, 'utf8').slice(0, 16);
+  
+  // _() — always the same on https://
+  let B2 = '';
+  for (let Ie = 1; Ie < 10; Ie++) B2 += m(Ie + 48);
+  B2 += m(48, 111, 0, 117, 121, 116, 114);
+  const iv = Buffer.from(B2, 'utf8').slice(0, 16);
+  
+  return { key, iv };
+}
+
+const { key: PELISPLUS_KEY, iv: PELISPLUS_IV } = _buildPelisplusKeyAndIV();
+
+/**
+ * Resolves a pelisplus embed URL (upns.pro, 4meplayer.pro, strp2p.com) to a direct m3u8.
+ */
+async function resolvePelisplus(embedUrl, userAgent, referer) {
+  try {
+    const urlObj = new URL(embedUrl);
+    const hash = urlObj.hash.replace('#', '');
+    const host = urlObj.hostname;
+    if (!hash) return null;
+    
+    const apiUrl = `https://${host}/api/v1/video?id=${hash}`;
+    const res = await fetch(apiUrl, {
+      headers: { 'User-Agent': userAgent, 'Referer': referer || embedUrl, 'Origin': `https://${host}` }
+    });
+    if (!res.ok) return null;
+    
+    const hexData = await res.text();
+    const buf = Buffer.from(hexData.trim(), 'hex');
+    
+    const decipher = crypto.createDecipheriv('aes-128-cbc', PELISPLUS_KEY, PELISPLUS_IV);
+    decipher.setAutoPadding(true);
+    const decrypted = decipher.update(buf, undefined, 'utf8') + decipher.final('utf8');
+    
+    // Strip all control/non-printable characters that get embedded in the JSON
+    const cleaned = decrypted.replace(/[^\x20-\x7E\x0A\x0D]/g, '');
+    let data = null;
+    try { data = JSON.parse(cleaned); } catch { /* try regex fallback below */ }
+    
+    // Regex fallback: extract source URL directly from the (possibly corrupted) JSON string
+    let src = data && data.source ? data.source : null;
+    if (!src) {
+      const sourceMatch = cleaned.match(/"source"\s*:\s*"([^"]+)"/);
+      if (sourceMatch) src = sourceMatch[1];
+    }
+    
+    if (src) {
+      src = src.split('\\/').join('/');
+      if (src.startsWith('ttps://')) src = 'h' + src;
+      if (!src.startsWith('http')) return null;
+      console.log(`Unpacker: Pelisplus resolved ${host} => ${src.substring(0, 80)}...`);
+      return src;
+    }
+    return null;
+  } catch (e) {
+    console.error('resolvePelisplus error:', e.message);
+    return null;
+  }
+}
+
+module.exports.resolvePelisplus = resolvePelisplus;
+
+
+
 function decryptEmbed69(html) {
   const powChallengeMatch = html.match(/const POW_CHALLENGE = '([^']+)';/);
   const powDifficultyMatch = html.match(/const POW_DIFFICULTY = (\d+);/);
@@ -131,10 +225,17 @@ module.exports.decryptEmbed69 = decryptEmbed69;
 
 /**
  * Advanced recursive player resolver.
- * Handles known external players (like embed69, vidhide, etc) to extract the final direct .m3u8/.mp4
+ * Handles known external players (like embed69, vidhide, pelisplus, emturbovid etc)
+ * to extract the final direct .m3u8/.mp4
  */
 async function resolvePlayerStream(url, userAgent, referer) {
     try {
+        // Pelisplus SPA players (upns, 4meplayer, strp2p)
+        if (url.includes('pelisplus.upns.pro') || url.includes('4meplayer.pro') || url.includes('strp2p.com')) {
+            const m3u8 = await resolvePelisplus(url, userAgent, referer);
+            if (m3u8) return m3u8;
+        }
+
         const res = await fetch(url, {
             headers: { 'User-Agent': userAgent, 'Referer': referer }
         });
@@ -142,6 +243,14 @@ async function resolvePlayerStream(url, userAgent, referer) {
         
         const html = await res.text();
         
+        // emturbovid / turbovidhls: extract m3u8 from data-hash attribute or urlPlay variable
+        if (url.includes('emturbovid') || url.includes('turbovidhls') || url.includes('turboviplay')) {
+            const dataHash = html.match(/data-hash=["']([^"']+\.m3u8[^"']*)/);
+            if (dataHash) return dataHash[1];
+            const urlPlay = html.match(/var\s+urlPlay\s*=\s*["']([^"']+\.m3u8[^"']*)/);
+            if (urlPlay) return urlPlay[1];
+        }
+
         // Check if it's embed69
         if (url.includes('embed69')) {
             const embed69Links = decryptEmbed69(html);
