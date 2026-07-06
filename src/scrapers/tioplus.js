@@ -11,6 +11,41 @@ function cleanText(str) {
     .replace(/[^a-z0-9]/g, '');
 }
 
+function extractSlug(url) {
+  const match = url.match(/\/(?:pelicula|serie)\/([^/?#]+)/);
+  return match?.[1] || '';
+}
+
+function scoreCandidate(result, targetTitle, originalTargetTitle, year) {
+  const cleanTargetTitle = cleanText(targetTitle);
+  const cleanOriginalTitle = cleanText(originalTargetTitle);
+  const cleanResultTitle = cleanText(result.title);
+  const cleanSlug = cleanText(extractSlug(result.url).replace(/-/g, ' '));
+  let score = 0;
+
+  if (cleanTargetTitle && (cleanResultTitle.includes(cleanTargetTitle) || cleanTargetTitle.includes(cleanResultTitle))) {
+    score += 3;
+  }
+  if (cleanOriginalTitle && (cleanResultTitle.includes(cleanOriginalTitle) || cleanOriginalTitle.includes(cleanResultTitle))) {
+    score += 2;
+  }
+  if (cleanSlug && (cleanSlug === cleanTargetTitle || cleanSlug === cleanOriginalTitle)) {
+    score += 4;
+  }
+  if (cleanSlug && (cleanTargetTitle.includes(cleanSlug) || cleanOriginalTitle.includes(cleanSlug))) {
+    score += 1;
+  }
+
+  if (year) {
+    const yearStr = year.toString();
+    if (result.title.includes(yearStr) || cleanResultTitle.includes(yearStr) || cleanSlug.includes(yearStr)) {
+      score += 2;
+    }
+  }
+
+  return score;
+}
+
 function slugifyTitle(str) {
   if (!str) return '';
   return str
@@ -115,30 +150,17 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     });
     console.log(`TioPlus performSearch("${searchQuery}") found:`, results);
 
-    const cleanTargetTitle = cleanText(title);
-    const cleanOriginalTitle = cleanText(originalTitle);
     let bestMatch = null;
+    let bestScore = 0;
 
     for (const r of results) {
-      const cleanResultTitle = cleanText(r.title);
-      const matchesTitle = cleanTargetTitle && (cleanResultTitle.includes(cleanTargetTitle) || cleanTargetTitle.includes(cleanResultTitle));
-      const matchesOriginal = cleanOriginalTitle && (cleanResultTitle.includes(cleanOriginalTitle) || cleanOriginalTitle.includes(cleanResultTitle));
-      
-      if (matchesTitle || matchesOriginal) {
-        if (year) {
-          const hasYear = r.title.includes(year.toString()) || cleanResultTitle.includes(year.toString());
-          if (hasYear) {
-            bestMatch = r;
-            break;
-          }
-        }
+      const score = scoreCandidate(r, title, originalTitle, year);
+      if (score > bestScore) {
+        bestScore = score;
         bestMatch = r;
       }
     }
 
-    if (!bestMatch && results.length > 0) {
-      bestMatch = results[0];
-    }
     return bestMatch;
   }
 

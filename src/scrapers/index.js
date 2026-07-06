@@ -75,12 +75,34 @@ async function verifyStream(stream, userAgent) {
     });
     clearTimeout(timeoutId);
 
-    if (headRes.status === 404) {
-      console.log(`Scraper orchestrator: Filtering out dead link (404): ${stream.url}`);
+    if ([403, 404, 410].includes(headRes.status)) {
+      console.log(`Scraper orchestrator: Filtering out dead/protected link (${headRes.status}): ${stream.url}`);
       return null;
     }
   } catch (err) {
-    // Keep stream on transient verification failures to avoid hiding good sources.
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), STREAM_VERIFICATION_TIMEOUT_MS);
+      const headers = {
+        'User-Agent': userAgent,
+        'Referer': stream?.behaviorHints?.proxyHeaders?.request?.Referer || 'https://sololatino.net/',
+        'Range': 'bytes=0-1'
+      };
+      const getRes = await fetch(stream.url, {
+        method: 'GET',
+        headers,
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      if ([403, 404, 410].includes(getRes.status)) {
+        console.log(`Scraper orchestrator: Filtering out dead/protected link after GET fallback (${getRes.status}): ${stream.url}`);
+        return null;
+      }
+    } catch (fallbackErr) {
+      console.log(`Scraper orchestrator: Filtering out unreachable link: ${stream.url}`);
+      return null;
+    }
   }
 
   return stream;
