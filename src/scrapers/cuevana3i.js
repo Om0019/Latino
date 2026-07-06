@@ -186,14 +186,6 @@ async function scrape(title, originalTitle, year, type, season, episode) {
         };
       }
 
-      const externalUrl = decodedUrl || wrapperUrl;
-      if (externalUrl) {
-        return {
-          name: 'Cuevana3i',
-          title: `🌐 ${optionName}`,
-          externalUrl
-        };
-      }
       return null;
     });
 

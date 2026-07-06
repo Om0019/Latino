@@ -12,14 +12,14 @@ const ENABLE_CINEHDPLUS = false;
 
 function getStreamHost(stream) {
   try {
-    return new URL(stream.url || stream.externalUrl).hostname.toLowerCase();
+    return new URL(stream.url).hostname.toLowerCase();
   } catch {
     return '';
   }
 }
 
 function isKnownBadStream(stream) {
-  const url = (stream.url || stream.externalUrl || '').toLowerCase();
+  const url = (stream.url || '').toLowerCase();
   return url.includes('test-videos.co.uk') || url.includes('big_buck_bunny');
 }
 
@@ -175,9 +175,11 @@ async function getStreams(type, id, season, episode) {
       }
     });
 
+    const directStreams = streams.filter((stream) => Boolean(stream?.url));
+
     // 3. Light verification pass to filter obvious 404s without delaying response too much
     const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-    const verifiedStreams = (await Promise.all(streams.map((stream) => verifyStream(stream, userAgent)))).filter(Boolean);
+    const verifiedStreams = (await Promise.all(directStreams.map((stream) => verifyStream(stream, userAgent)))).filter(Boolean);
     return sortStreams(verifiedStreams);
 
   } catch (err) {
