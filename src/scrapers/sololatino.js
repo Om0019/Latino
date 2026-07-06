@@ -190,10 +190,6 @@ async function scrape(title, year, type, season, episode) {
             const streamUrl = apiJson.url;
             const isIframe = apiJson.type === 'iframe' || streamUrl.includes('embed') || streamUrl.includes('player') || streamUrl.includes('/f/');
             
-            const streamObj = {
-              name: `Flava 📺 SoloLatino`,
-              title: `SoloLatino 🇪🇸 [Latino]\nServer: ${pInfo.name}\nDirect HLS Play Stream`
-            };
 
             let directUrl = null;
             if (isIframe) {
@@ -284,21 +280,22 @@ async function scrape(title, year, type, season, episode) {
 
 
             if (directUrl) {
-              streamObj.url = directUrl;
-              streamObj.behaviorHints = {
-                notWebReady: true,
-                proxyHeaders: {
-                  request: {
-                    "User-Agent": userAgent,
-                    "Referer": streamUrl || "https://sololatino.net/"
+              const streamObj = {
+                name: `SoloLatino`,
+                title: `🇲🇽 ${pInfo.name}`,
+                url: directUrl,
+                behaviorHints: {
+                  notWebReady: true,
+                  proxyHeaders: {
+                    request: {
+                      "User-Agent": userAgent,
+                      "Referer": streamUrl || "https://sololatino.net/"
+                    }
                   }
                 }
               };
-            } else {
-              streamObj.externalUrl = streamUrl;
-              streamObj.title = `SoloLatino 🇪🇸 [Latino]\nServer: ${pInfo.name}\nExternal Web Player (Fallback)`;
+              streams.push(streamObj);
             }
-            streams.push(streamObj);
           }
         } else {
           console.warn(`SoloLatino: API /api/player-url returned status ${apiRes.status} for server ${pInfo.name}`);

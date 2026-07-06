@@ -12,9 +12,9 @@ app.use(express.json());
 
 // Declare the Stremio Addon Manifest
 const manifest = {
-  id: 'com.flava.spanish',
+  id: 'com.latino.spanish',
   version: '1.0.0',
-  name: 'Flava 🌊',
+  name: 'Latino 🇲🇽',
   description: 'Películas y Series en Español Latino y Castellano directas de Cinecalidad, SoloLatino, TioPlus y CineHDPlus.',
   logo: 'https://images.unsplash.com/photo-1574267431422-7bda297781f5?q=80&w=256&auto=format&fit=crop',
   background: 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?q=80&w=1280&auto=format&fit=crop',
@@ -85,7 +85,7 @@ app.get('/', (req, res) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Flava Addon - Stremio en Español</title>
+  <title>Latino Addon - Stremio en Español</title>
   <!-- Google Fonts Outfit & Inter -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -406,7 +406,7 @@ app.get('/', (req, res) => {
     <header>
       <div class="logo-container">
         <div class="logo-glow"></div>
-        <h1 class="logo">Flava</h1>
+        <h1 class="logo">Latino</h1>
       </div>
       <p class="subtitle">Agregador premium de películas y series en español para Stremio</p>
     </header>
@@ -474,14 +474,14 @@ app.get('/', (req, res) => {
         </div>
         <div class="step-item">
           <div class="step-num">3</div>
-          <div class="step-text">¡Todo listo! Ve al catálogo de Stremio y busca tus películas o series preferidas. Aparecerán los enlaces de <strong>Flava 🌊</strong> con sus respectivos servidores de video.</div>
+          <div class="step-text">¡Todo listo! Ve al catálogo de Stremio y busca tus películas o series preferidas. Aparecerán los enlaces de <strong>Latino 🇲🇽</strong> con sus respectivos servidores de video.</div>
         </div>
       </div>
     </div>
   </div>
 
   <footer>
-    <p>Flava Addon v${manifest.version} | Alimentado directamente por TMDB API</p>
+    <p>Latino Addon v${manifest.version} | Alimentado directamente por TMDB API</p>
   </footer>
 
 </body>

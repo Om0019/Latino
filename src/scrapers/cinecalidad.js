@@ -129,27 +129,23 @@ async function scrape(title, year, type, season, episode) {
       try {
         const directUrl = await unpacker.resolvePlayerStream(opt.playerUrl, userAgent, bestMatch.url);
 
-        const streamObj = {
-          name: `Flava 📺 Cinecalidad`,
-          title: `Cinecalidad 🇪🇸 [Castellano/Latino]\nServer: ${opt.serverName}\nDirect HLS Play Stream`
-        };
-
         if (directUrl) {
-          streamObj.url = directUrl;
-          streamObj.behaviorHints = {
-            notWebReady: true,
-            proxyHeaders: {
-              request: {
-                "User-Agent": userAgent,
-                "Referer": opt.playerUrl
+          const streamObj = {
+            name: `Cinecalidad`,
+            title: `🇲🇽 ${opt.serverName}`,
+            url: directUrl,
+            behaviorHints: {
+              notWebReady: true,
+              proxyHeaders: {
+                request: {
+                  "User-Agent": userAgent,
+                  "Referer": opt.playerUrl
+                }
               }
             }
           };
-        } else {
-          streamObj.externalUrl = opt.playerUrl;
-          streamObj.title = `Cinecalidad 🇪🇸 [Castellano/Latino]\nServer: ${opt.serverName}\nExternal Web Player (Fallback)`;
+          streams.push(streamObj);
         }
-        streams.push(streamObj);
       } catch (err) {
         console.error(`Cinecalidad: Error resolving direct stream for ${opt.serverName}:`, err.message);
       }
