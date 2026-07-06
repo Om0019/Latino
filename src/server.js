@@ -24,32 +24,9 @@ const manifest = {
       name: 'stream',
       types: ['movie', 'series'],
       idPrefixes: ['tt', 'tmdb']
-    },
-    {
-      name: 'catalog',
-      types: ['movie', 'series'],
-      idPrefixes: ['tmdb']
-    },
-    {
-      name: 'meta',
-      types: ['movie', 'series'],
-      idPrefixes: ['tmdb']
     }
   ],
-  catalogs: [
-    {
-      type: 'movie',
-      id: 'flava_movies_trending',
-      name: 'Flava - Tendencias Películas',
-      extra: [{ name: 'search', isRequired: false }]
-    },
-    {
-      type: 'series',
-      id: 'flava_series_trending',
-      name: 'Flava - Tendencias Series',
-      extra: [{ name: 'search', isRequired: false }]
-    }
-  ]
+  catalogs: []
 };
 
 // 1. Manifest Endpoint
@@ -57,62 +34,7 @@ app.get('/manifest.json', (req, res) => {
   res.json(manifest);
 });
 
-// 2. Catalog Endpoint (Standard)
-app.get('/catalog/:type/:id.json', async (req, res) => {
-  const { type, id } = req.params;
-  await handleCatalog(type, id, null, res);
-});
-
-// Catalog Endpoint (With search or filters)
-app.get('/catalog/:type/:id/:extra.json', async (req, res) => {
-  const { type, id, extra } = req.params;
-  await handleCatalog(type, id, extra, res);
-});
-
-async function handleCatalog(type, id, extra, res) {
-  let searchQuery = '';
-  if (extra) {
-    const match = extra.match(/search=(.+)/);
-    if (match) {
-      searchQuery = decodeURIComponent(match[1]);
-    }
-  }
-
-  try {
-    let metas = [];
-    if (searchQuery) {
-      metas = await tmdb.searchCatalog(type, searchQuery);
-    } else if (id === 'flava_movies_trending' || id === 'flava_series_trending') {
-      metas = await tmdb.getTrending(type);
-    }
-
-    res.json({ metas });
-  } catch (error) {
-    console.error('Catalog Route Error:', error.message);
-    res.status(500).json({ error: 'Internal Server Error' });
-  }
-}
-
-// 3. Metadata Endpoint
-app.get('/meta/:type/:id.json', async (req, res) => {
-  const { type, id } = req.params;
-
-  try {
-    if (id.startsWith('tmdb:')) {
-      const tmdbId = id.split(':')[2];
-      const meta = await tmdb.getMetaDetails(type, tmdbId);
-      if (meta) {
-        return res.json({ meta });
-      }
-    }
-    res.status(404).json({ error: 'Metadata not found' });
-  } catch (error) {
-    console.error('Meta Route Error:', error.message);
-    res.status(500).json({ error: 'Internal Server Error' });
-  }
-});
-
-// 4. Stream Endpoint
+// 2. Stream Endpoint
 app.get('/stream/:type/:id.json', async (req, res) => {
   const { type, id } = req.params;
   
@@ -150,7 +72,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   }
 });
 
-// 5. Landing / Dashboard Page Route
+// 3. Landing / Dashboard Page Route
 app.get('/', (req, res) => {
   const host = req.get('host');
   const protocol = req.headers['x-forwarded-proto'] || req.protocol;
