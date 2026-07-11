@@ -33,12 +33,34 @@ function extractSlug(url) {
   return match?.[1] || '';
 }
 
+function extractCandidateYears(...values) {
+  const years = new Set();
+
+  for (const value of values) {
+    const matches = String(value || '').match(/\b(?:19|20)\d{2}\b/g) || [];
+    for (const match of matches) {
+      years.add(match);
+    }
+  }
+
+  return years;
+}
+
 function scoreCandidate(result, targetTitle, originalTargetTitle, year) {
   const cleanTargetTitle = cleanText(targetTitle);
   const cleanOriginalTitle = cleanText(originalTargetTitle);
   const cleanResultTitle = cleanText(result.title);
-  const cleanSlug = cleanText(extractSlug(result.url).replace(/-/g, ' '));
+  const slug = extractSlug(result.url);
+  const cleanSlug = cleanText(slug.replace(/-/g, ' '));
   let score = 0;
+
+  if (year) {
+    const yearStr = year.toString();
+    const candidateYears = extractCandidateYears(result.title, slug);
+    if (candidateYears.size > 0 && !candidateYears.has(yearStr)) {
+      return 0;
+    }
+  }
 
   if (cleanTargetTitle && cleanResultTitle === cleanTargetTitle) score += 5;
   if (cleanOriginalTitle && cleanResultTitle === cleanOriginalTitle) score += 4;
@@ -55,7 +77,7 @@ function scoreCandidate(result, targetTitle, originalTargetTitle, year) {
   if (year) {
     const yearStr = year.toString();
     if (result.title.includes(yearStr) || cleanResultTitle.includes(yearStr) || cleanSlug.includes(yearStr)) {
-      score += 2;
+      score += 8;
     }
   }
 

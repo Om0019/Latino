@@ -2,6 +2,7 @@ const { getStreams } = require('./src/scrapers');
 
 const cases = [
   { type: 'movie', id: 'tmdb:movie:299534', label: 'Avengers: Endgame' },
+  { type: 'movie', id: 'tmdb:movie:1061474', label: 'Superman (2025)' },
   { type: 'movie', id: 'tmdb:movie:533535', label: 'Deadpool & Wolverine' },
   { type: 'movie', id: 'tmdb:movie:550', label: 'Fight Club' },
   { type: 'series', id: 'tmdb:series:100088', label: 'The Last of Us S1E1', season: 1, episode: 1 },
