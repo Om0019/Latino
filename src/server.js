@@ -5,6 +5,7 @@ const { fetchWithTimeout } = require('./http');
 
 const app = express();
 const PROXY_FETCH_TIMEOUT_MS = 8000;
+const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 // Enable CORS for Stremio client compatibility
 app.use(cors());
@@ -38,12 +39,53 @@ function getPublicBaseUrl(req) {
 function shouldProxyStream(stream) {
   try {
     const url = new URL(stream.url);
+    const host = url.hostname.toLowerCase();
     const title = (stream.title || '').toLowerCase();
-    return url.hostname.toLowerCase().includes('mediafire.com')
-      || title.includes('premium');
+    const hasProxyHeaders = Boolean(stream?.behaviorHints?.proxyHeaders?.request);
+    const headerSensitiveHost = host.includes('acek-cdn.com')
+      || host.includes('dramiyos-cdn.com')
+      || host.includes('cfglobalcdn.com')
+      || host.includes('turboviplay.com')
+      || host.includes('premilkyway.com')
+      || host.includes('cdn-tnmr.org')
+      || host.includes('mediafire.com')
+      || host.includes('fireload.com');
+
+    return title.includes('premium')
+      || headerSensitiveHost
+      || hasProxyHeaders;
   } catch {
     return false;
   }
+}
+
+function proxiedStreamUrl(baseUrl, targetUrl, referer) {
+  return `${baseUrl}/proxy/stream?url=${encodeURIComponent(targetUrl)}&referer=${encodeURIComponent(referer || '')}`;
+}
+
+function rewriteHlsManifest(manifestText, targetUrl, req) {
+  const baseUrl = getPublicBaseUrl(req);
+  const referer = req.query.referer || targetUrl;
+
+  const rewriteUri = (uri) => {
+    if (!uri || uri.startsWith('data:')) return uri;
+    const absoluteUrl = new URL(uri, targetUrl).toString();
+    return proxiedStreamUrl(baseUrl, absoluteUrl, referer);
+  };
+
+  return manifestText
+    .split(/\r?\n/)
+    .map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return line;
+
+      if (trimmed.startsWith('#')) {
+        return line.replace(/URI="([^"]+)"/g, (_match, uri) => `URI="${rewriteUri(uri)}"`);
+      }
+
+      return rewriteUri(trimmed);
+    })
+    .join('\n');
 }
 
 function wrapProxyStreams(streams, req) {
@@ -54,7 +96,8 @@ function wrapProxyStreams(streams, req) {
       return stream;
     }
 
-    const proxiedUrl = `${baseUrl}/proxy/stream?url=${encodeURIComponent(stream.url)}&referer=${encodeURIComponent(stream?.behaviorHints?.proxyHeaders?.request?.Referer || '')}`;
+    const requestHeaders = stream?.behaviorHints?.proxyHeaders?.request || {};
+    const proxiedUrl = proxiedStreamUrl(baseUrl, stream.url, requestHeaders.Referer || '');
 
     return {
       ...stream,
@@ -63,7 +106,7 @@ function wrapProxyStreams(streams, req) {
         ...(stream.behaviorHints || {}),
         proxyHeaders: {
           request: {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            'User-Agent': DEFAULT_USER_AGENT
           }
         }
       }
@@ -97,7 +140,7 @@ app.get('/proxy/stream', async (req, res) => {
 
   try {
     const headers = {
-      'User-Agent': req.get('user-agent') || 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'User-Agent': req.get('user-agent') || DEFAULT_USER_AGENT,
       'Referer': referer
     };
 
@@ -112,16 +155,27 @@ app.get('/proxy/stream', async (req, res) => {
 
     res.status(upstream.status);
 
+    const contentType = upstream.headers.get('content-type') || '';
     const contentLength = upstream.headers.get('content-length');
     const contentRange = upstream.headers.get('content-range');
     const acceptRanges = upstream.headers.get('accept-ranges');
+    const isHlsManifest = /\.m3u8(?:$|[?#])/i.test(parsed.pathname + parsed.search)
+      || contentType.toLowerCase().includes('mpegurl')
+      || contentType.toLowerCase().includes('application/vnd.apple');
 
-    res.setHeader('Content-Type', 'video/mp4');
-    res.setHeader('Content-Disposition', 'inline; filename="stream.mp4"');
-    if (contentLength) res.setHeader('Content-Length', contentLength);
+    res.setHeader('Content-Type', isHlsManifest ? 'application/vnd.apple.mpegurl' : (contentType || 'application/octet-stream'));
+    res.setHeader('Content-Disposition', 'inline');
     if (contentRange) res.setHeader('Content-Range', contentRange);
     if (acceptRanges) res.setHeader('Accept-Ranges', acceptRanges);
     res.setHeader('Access-Control-Allow-Origin', '*');
+
+    if (isHlsManifest) {
+      const manifestText = await upstream.text();
+      res.send(rewriteHlsManifest(manifestText, targetUrl, req));
+      return;
+    }
+
+    if (contentLength) res.setHeader('Content-Length', contentLength);
 
     if (!upstream.body) {
       return res.end();
@@ -598,5 +652,11 @@ app.get('/', (req, res) => {
 </html>
   `);
 });
+
+app.__test = {
+  shouldProxyStream,
+  proxiedStreamUrl,
+  rewriteHlsManifest
+};
 
 module.exports = app;

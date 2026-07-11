@@ -14,8 +14,9 @@ const FAST_SOURCE_MIN_STREAMS = 3;
 const FAST_SOURCE_MIN_SOURCES = 1;
 const STREAM_VALIDATION_TIMEOUT_MS = 5000;
 const STREAM_VALIDATION_TOTAL_TIMEOUT_MS = 4000;
-const STREAM_VALIDATION_FAST_TIMEOUT_MS = 2200;
-const MAX_VALIDATION_CANDIDATES = 6;
+const STREAM_VALIDATION_FAST_TIMEOUT_MS = 3200;
+const MIN_CONFIRMED_STREAMS = 3;
+const MAX_VALIDATION_CANDIDATES = 8;
 const STREAM_CACHE_TTL_MS = 10 * 60 * 1000;
 const ENABLE_CINEHDPLUS = false;
 const HOST_HEALTH_TTL_MS = 5 * 60 * 1000;
@@ -282,34 +283,68 @@ async function validatePlayableStreams(streams) {
   const sortedStreams = sortStreams(streams);
   const streamsToValidate = sortedStreams.slice(0, MAX_VALIDATION_CANDIDATES);
   const remainingStreams = sortedStreams.slice(MAX_VALIDATION_CANDIDATES);
-  const validationPromise = Promise.all(
-    streamsToValidate.map(async (stream) => ((await isPlayableStream(stream)) ? stream : null))
-  );
 
-  const timeoutPromise = new Promise((resolve) => {
-    const timeoutMs = remainingStreams.length > 0
-      ? STREAM_VALIDATION_FAST_TIMEOUT_MS
-      : STREAM_VALIDATION_TOTAL_TIMEOUT_MS;
-    setTimeout(() => resolve(null), timeoutMs);
-  });
-
-  const result = await Promise.race([validationPromise, timeoutPromise]);
-  if (!result) {
-    console.warn('Scraper orchestrator: Stream validation timed out; returning URL-sanitized streams.');
-    return sortedStreams;
+  if (streamsToValidate.length === 0) {
+    return [];
   }
 
-  const playableStreams = result.filter(Boolean);
+  const playableStreams = [];
+  let completed = 0;
+  let resolveEnoughConfirmed;
+  let resolveAllComplete;
+
+  const enoughConfirmedPromise = new Promise((resolve) => {
+    resolveEnoughConfirmed = resolve;
+  });
+  const allCompletePromise = new Promise((resolve) => {
+    resolveAllComplete = resolve;
+  });
+
+  streamsToValidate.forEach((stream) => {
+    isPlayableStream(stream)
+      .then((playable) => {
+        if (playable) {
+          playableStreams.push(stream);
+          if (playableStreams.length >= MIN_CONFIRMED_STREAMS) {
+            resolveEnoughConfirmed('enough-confirmed');
+          }
+        }
+      })
+      .catch((error) => {
+        console.log(`Scraper orchestrator: Validation task failed for ${stream.url}: ${error.message}`);
+        recordHostHealth(stream, false);
+      })
+      .finally(() => {
+        completed += 1;
+        if (completed === streamsToValidate.length) {
+          resolveAllComplete('complete');
+        }
+      });
+  });
+
+  const timeoutMs = remainingStreams.length > 0
+    ? STREAM_VALIDATION_FAST_TIMEOUT_MS
+    : STREAM_VALIDATION_TOTAL_TIMEOUT_MS;
+  const completionReason = await Promise.race([
+    enoughConfirmedPromise,
+    allCompletePromise,
+    new Promise((resolve) => setTimeout(() => resolve('timeout'), timeoutMs))
+  ]);
+
   if (playableStreams.length > 0) {
-    return playableStreams;
+    if (completionReason === 'timeout') {
+      console.warn(`Scraper orchestrator: Validation timed out; returning ${playableStreams.length} confirmed playable streams and dropping slow candidates.`);
+    }
+    return sortStreams(playableStreams);
   }
 
   if (remainingStreams.length > 0) {
+    console.warn('Scraper orchestrator: No validated streams yet; returning lower-priority sanitized fallback streams to avoid a false empty result.');
     return remainingStreams;
   }
 
   if (sortedStreams.length > 0) {
-    console.warn('Scraper orchestrator: Validation rejected all candidates; returning URL-sanitized streams to avoid a false empty result.');
+    console.warn('Scraper orchestrator: Validation found no confirmed playable streams; returning URL-sanitized streams to avoid a false empty result.');
   }
   return sortedStreams;
 }
