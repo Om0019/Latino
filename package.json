@@ -5,7 +5,9 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --check index.js && node --check src/server.js && node --check src/http.js && node --check src/tmdb.js && node --check src/unpacker.js && node --check src/scrapers/index.js && node --check src/scrapers/sololatino.js && node --check src/scrapers/tioplus.js && node --check src/scrapers/cinecalidad.js && node --check src/scrapers/cuevana3i.js && node --check src/scrapers/cinehdplus.js && node --check test_host_wrappers.js && node --check test_wrapper_smoke.js && node --check test_titles.js",
+    "test:wrappers": "node test_host_wrappers.js",
+    "test:smoke": "node test_wrapper_smoke.js"
   },
   "keywords": [],
   "author": "",

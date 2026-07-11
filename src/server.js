@@ -1,10 +1,10 @@
 const express = require('express');
 const cors = require('cors');
-const path = require('path');
-const tmdb = require('./tmdb');
 const scrapers = require('./scrapers');
+const { fetchWithTimeout } = require('./http');
 
 const app = express();
+const PROXY_FETCH_TIMEOUT_MS = 8000;
 
 // Enable CORS for Stremio client compatibility
 app.use(cors());
@@ -106,9 +106,9 @@ app.get('/proxy/stream', async (req, res) => {
       headers.Range = range;
     }
 
-    const upstream = await fetch(targetUrl, {
+    const upstream = await fetchWithTimeout(targetUrl, {
       headers
-    });
+    }, PROXY_FETCH_TIMEOUT_MS);
 
     res.status(upstream.status);
 
@@ -129,17 +129,13 @@ app.get('/proxy/stream', async (req, res) => {
 
     const reader = upstream.body.getReader();
 
-    async function pump() {
+    while (true) {
       const { done, value } = await reader.read();
-      if (done) {
-        res.end();
-        return;
-      }
+      if (done) break;
       res.write(Buffer.from(value));
-      await pump();
     }
 
-    await pump();
+    res.end();
   } catch (error) {
     console.error('Proxy Stream Error:', error.message);
     res.status(502).send('Proxy error');

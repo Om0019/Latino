@@ -1,6 +1,15 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
+const { fetchWithTimeout } = require('../http');
 const TOKEN_CONCURRENCY = 4;
+const SEARCH_TIMEOUT_MS = 4500;
+const PAGE_TIMEOUT_MS = 5500;
+const PROBE_TIMEOUT_MS = 2500;
+
+function isP2POption(value) {
+  const text = String(value || '').toLowerCase();
+  return text.includes('p2p') || text.includes('torrent') || text.includes('strp2p.com');
+}
 
 function cleanText(str) {
   if (!str) return '';
@@ -123,12 +132,12 @@ async function scrape(title, originalTitle, year, type, season, episode) {
 
   async function performSearch(searchQuery) {
     const searchUrl = `https://tioplus.app/api/search/${encodeURIComponent(searchQuery)}`;
-    const res = await fetch(searchUrl, {
+    const res = await fetchWithTimeout(searchUrl, {
       headers: {
         'User-Agent': userAgent,
         'x-requested-with': 'XMLHttpRequest'
       }
-    });
+    }, SEARCH_TIMEOUT_MS);
     console.log(`TioPlus search HTTP status for ${searchQuery}:`, res.status);
     if (!res.ok) return [];
 
@@ -175,9 +184,9 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     if (!bestMatch) {
       for (const candidate of buildFallbackUrls(type, title, originalTitle)) {
         try {
-          const probeRes = await fetch(candidate.url, {
+          const probeRes = await fetchWithTimeout(candidate.url, {
             headers: { 'User-Agent': userAgent }
-          });
+          }, PROBE_TIMEOUT_MS);
           if (probeRes.ok) {
             console.log(`TioPlus: Using direct URL fallback ${candidate.url}`);
             bestMatch = candidate;
@@ -205,9 +214,9 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     console.log(`TioPlus: Matched content URL: ${targetPageUrl}`);
 
     // 2. Fetch target page to extract player server tokens
-    const pageRes = await fetch(targetPageUrl, {
+    const pageRes = await fetchWithTimeout(targetPageUrl, {
       headers: { 'User-Agent': userAgent }
-    });
+    }, PAGE_TIMEOUT_MS);
     if (!pageRes.ok) {
       console.warn(`TioPlus: Failed to fetch target page: ${targetPageUrl} (${pageRes.status})`);
       return [];
@@ -242,8 +251,18 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     // 3. For each token, resolve player redirect
     const streams = await mapWithConcurrency(serverTokens, TOKEN_CONCURRENCY, async (sInfo) => {
       try {
+        if (isP2POption(sInfo.name) || isP2POption(sInfo.token)) {
+          console.log(`TioPlus: Skipping P2P/torrent server ${sInfo.name}`);
+          return null;
+        }
+
         const ol = b64_to_utf8(sInfo.token);
         if (!ol) return null;
+
+        if (isP2POption(ol)) {
+          console.log(`TioPlus: Skipping P2P/torrent decoded URL for ${sInfo.name}`);
+          return null;
+        }
 
         // Shortcut: if the decoded token is a pelisplus or emturbovid URL,
         // resolve it directly without going through the obfuscated tioplus player page
@@ -260,12 +279,12 @@ async function scrape(title, originalTitle, year, type, season, episode) {
           const playerUrl = `https://tioplus.app/player/${innerPath}`;
 
           // Fetch player page
-          const playerRes = await fetch(playerUrl, {
+          const playerRes = await fetchWithTimeout(playerUrl, {
             headers: {
               'User-Agent': userAgent,
               'Referer': 'https://tioplus.app/'
             }
-          });
+          }, PAGE_TIMEOUT_MS);
           if (!playerRes.ok) return null;
 
           const playerHtml = await playerRes.text();

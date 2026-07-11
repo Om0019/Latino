@@ -1,6 +1,11 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
+const { fetchWithTimeout } = require('../http');
 const TOKEN_CONCURRENCY = 3;
+const SEARCH_TIMEOUT_MS = 4500;
+const PAGE_TIMEOUT_MS = 5500;
+const API_TIMEOUT_MS = 5000;
+const PROBE_TIMEOUT_MS = 2500;
 
 function cleanText(str) {
   if (!str) return '';
@@ -21,6 +26,40 @@ function slugifyTitle(str) {
     .replace(/\band\b/g, 'y')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
+}
+
+function extractSlug(url) {
+  const match = url.match(/\/(?:pelicula|serie)\/([^/?#]+)/);
+  return match?.[1] || '';
+}
+
+function scoreCandidate(result, targetTitle, originalTargetTitle, year) {
+  const cleanTargetTitle = cleanText(targetTitle);
+  const cleanOriginalTitle = cleanText(originalTargetTitle);
+  const cleanResultTitle = cleanText(result.title);
+  const cleanSlug = cleanText(extractSlug(result.url).replace(/-/g, ' '));
+  let score = 0;
+
+  if (cleanTargetTitle && cleanResultTitle === cleanTargetTitle) score += 5;
+  if (cleanOriginalTitle && cleanResultTitle === cleanOriginalTitle) score += 4;
+  if (cleanSlug && cleanSlug === cleanTargetTitle) score += 5;
+  if (cleanSlug && cleanSlug === cleanOriginalTitle) score += 4;
+
+  if (cleanTargetTitle && (cleanResultTitle.includes(cleanTargetTitle) || cleanTargetTitle.includes(cleanResultTitle))) {
+    score += 2;
+  }
+  if (cleanOriginalTitle && (cleanResultTitle.includes(cleanOriginalTitle) || cleanOriginalTitle.includes(cleanResultTitle))) {
+    score += 2;
+  }
+
+  if (year) {
+    const yearStr = year.toString();
+    if (result.title.includes(yearStr) || cleanResultTitle.includes(yearStr) || cleanSlug.includes(yearStr)) {
+      score += 2;
+    }
+  }
+
+  return score;
 }
 
 function buildFallbackUrls(type, title, originalTitle) {
@@ -70,9 +109,9 @@ async function scrape(title, originalTitle, year, type, season, episode) {
 
   async function performSearch(searchQuery) {
     const searchUrl = `https://sololatino.net/buscar?q=${encodeURIComponent(searchQuery)}`;
-    const res = await fetch(searchUrl, {
+    const res = await fetchWithTimeout(searchUrl, {
       headers: { 'User-Agent': userAgent }
-    });
+    }, SEARCH_TIMEOUT_MS);
     if (!res.ok) return [];
 
     const html = await res.text();
@@ -105,29 +144,15 @@ async function scrape(title, originalTitle, year, type, season, episode) {
       }
     }
 
-    const cleanTargetTitle = cleanText(title);
-    const cleanOriginalTitle = cleanText(originalTitle);
     let bestMatch = null;
+    let bestScore = 0;
 
     for (const r of uniqueResults) {
-      const cleanResultTitle = cleanText(r.title);
-      const matchesTitle = cleanTargetTitle && (cleanResultTitle.includes(cleanTargetTitle) || cleanTargetTitle.includes(cleanResultTitle));
-      const matchesOriginal = cleanOriginalTitle && (cleanResultTitle.includes(cleanOriginalTitle) || cleanOriginalTitle.includes(cleanResultTitle));
-      
-      if (matchesTitle || matchesOriginal) {
-        if (year) {
-          const hasYear = r.title.includes(year.toString()) || cleanResultTitle.includes(year.toString());
-          if (hasYear) {
-            bestMatch = r;
-            break;
-          }
-        }
+      const score = scoreCandidate(r, title, originalTitle, year);
+      if (score > bestScore) {
+        bestScore = score;
         bestMatch = r;
       }
-    }
-
-    if (!bestMatch && uniqueResults.length > 0) {
-      bestMatch = uniqueResults[0];
     }
 
     return bestMatch;
@@ -144,9 +169,9 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     if (!bestMatch) {
       for (const candidate of buildFallbackUrls(type, title, originalTitle)) {
         try {
-          const probeRes = await fetch(candidate.url, {
+          const probeRes = await fetchWithTimeout(candidate.url, {
             headers: { 'User-Agent': userAgent }
-          });
+          }, PROBE_TIMEOUT_MS);
           if (probeRes.ok) {
             console.log(`SoloLatino: Using direct URL fallback ${candidate.url}`);
             bestMatch = candidate;
@@ -175,12 +200,12 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     console.log(`SoloLatino: Matched content URL: ${targetPageUrl}`);
 
     // 2. Fetch Laravel Sanctum CSRF cookie to establish session cookies
-    const csrfRes = await fetch('https://sololatino.net/sanctum/csrf-cookie', {
+    const csrfRes = await fetchWithTimeout('https://sololatino.net/sanctum/csrf-cookie', {
       headers: {
         'User-Agent': userAgent,
         'Accept': 'application/json'
       }
-    });
+    }, API_TIMEOUT_MS);
     if (!csrfRes.ok) {
       console.warn(`SoloLatino: Sanctum handshake failed with status ${csrfRes.status}`);
       return [];
@@ -206,11 +231,11 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     const cookieString = `XSRF-TOKEN=${xsrfCookieVal}; sololatinonet-session=${sessionCookieVal}`;
 
     // 3. Fetch the actual content page (movie or episode details page) to get the CSRF token and player tokens
-    const pageRes = await fetch(targetPageUrl, {
+    const pageRes = await fetchWithTimeout(targetPageUrl, {
       headers: {
         'User-Agent': userAgent
       }
-    });
+    }, PAGE_TIMEOUT_MS);
     if (!pageRes.ok) {
       console.warn(`SoloLatino: Failed to fetch target page: ${targetPageUrl} (${pageRes.status})`);
       return [];
@@ -244,7 +269,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     // 4. Query the /api/player-url endpoint for each token
     const streams = await mapWithConcurrency(playerTokens, TOKEN_CONCURRENCY, async (pInfo) => {
       try {
-        const apiRes = await fetch('https://sololatino.net/api/player-url', {
+        const apiRes = await fetchWithTimeout('https://sololatino.net/api/player-url', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -256,7 +281,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
             'Origin': 'https://sololatino.net'
           },
           body: JSON.stringify({ t: pInfo.token })
-        });
+        }, API_TIMEOUT_MS);
 
         if (apiRes.status === 200) {
           const apiJson = await apiRes.json();
@@ -270,9 +295,9 @@ async function scrape(title, originalTitle, year, type, season, episode) {
               try {
                 // If it is player.pelisserieshoy.com, perform the s.php handshake to fetch direct streams!
                 if (streamUrl.includes('player.pelisserieshoy.com')) {
-                  const pPageRes = await fetch(streamUrl, {
+                  const pPageRes = await fetchWithTimeout(streamUrl, {
                     headers: { 'User-Agent': userAgent, 'Referer': 'https://sololatino.net/' }
-                  });
+                  }, PAGE_TIMEOUT_MS);
                   if (pPageRes.ok) {
                     const pHtml = await pPageRes.text();
                     const tokenMatch = pHtml.match(/const\s+_t\s*=\s*['"]([^'"]+)['"]/);
@@ -280,7 +305,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
                       const tToken = tokenMatch[1];
                       
                       // 1. Register click
-                      await fetch('https://player.pelisserieshoy.com/s.php', {
+                      await fetchWithTimeout('https://player.pelisserieshoy.com/s.php', {
                         method: 'POST',
                         headers: {
                           'Content-Type': 'application/x-www-form-urlencoded',
@@ -289,10 +314,10 @@ async function scrape(title, originalTitle, year, type, season, episode) {
                           'Origin': 'https://player.pelisserieshoy.com'
                         },
                         body: new URLSearchParams({ a: 'click', tok: tToken })
-                      });
+                      }, API_TIMEOUT_MS);
 
                       // 2. Fetch server list
-                      const sListRes = await fetch('https://player.pelisserieshoy.com/s.php', {
+                      const sListRes = await fetchWithTimeout('https://player.pelisserieshoy.com/s.php', {
                         method: 'POST',
                         headers: {
                           'Content-Type': 'application/x-www-form-urlencoded',
@@ -301,7 +326,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
                           'Origin': 'https://player.pelisserieshoy.com'
                         },
                         body: new URLSearchParams({ a: '1', tok: tToken })
-                      });
+                      }, API_TIMEOUT_MS);
 
                       if (sListRes.ok) {
                         const sListJson = await sListRes.json();
@@ -309,7 +334,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
                           // Extract first server
                           const [sLabel, sVal] = sListJson.s[0];
                           // 3. Request direct file path
-                          const playValRes = await fetch('https://player.pelisserieshoy.com/s.php', {
+                          const playValRes = await fetchWithTimeout('https://player.pelisserieshoy.com/s.php', {
                             method: 'POST',
                             headers: {
                               'Content-Type': 'application/x-www-form-urlencoded',
@@ -318,18 +343,18 @@ async function scrape(title, originalTitle, year, type, season, episode) {
                               'Origin': 'https://player.pelisserieshoy.com'
                             },
                             body: new URLSearchParams({ a: '2', v: sVal, tok: tToken })
-                          });
+                          }, API_TIMEOUT_MS);
 
                           if (playValRes.ok) {
                             const playValJson = await playValRes.json();
                             if (playValJson && playValJson.u) {
                               const pathUrl = 'https://player.pelisserieshoy.com' + playValJson.u;
                               // 4. Resolve mediafire/direct redirect location header
-                              const redirectCheck = await fetch(pathUrl, {
+                              const redirectCheck = await fetchWithTimeout(pathUrl, {
                                 method: 'GET',
                                 headers: { 'User-Agent': userAgent, 'Referer': streamUrl },
                                 redirect: 'manual'
-                              });
+                              }, API_TIMEOUT_MS);
                               if (redirectCheck.status === 302 || redirectCheck.status === 301) {
                                 directUrl = redirectCheck.headers.get('location');
                               } else {

@@ -1,3 +1,5 @@
+const { fetchWithTimeout } = require('../http');
+
 /**
  * CineHDPlus Scraper
  * Note: cinehdplus.org is currently protected by Cloudflare Turnstile/JS challenge (403).
@@ -11,14 +13,9 @@ async function scrape(title, originalTitle, year, type, season, episode) {
   try {
     console.log(`CineHDPlus: Checking accessibility for ${targetUrl}`);
     // Probe the site with a short timeout to check if it's open or blocked
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 3000);
-
-    const res = await fetch(targetUrl, {
-      headers: { 'User-Agent': userAgent },
-      signal: controller.signal
-    });
-    clearTimeout(timeoutId);
+    const res = await fetchWithTimeout(targetUrl, {
+      headers: { 'User-Agent': userAgent }
+    }, 3000);
 
     if (res.status === 403) {
       console.log(`CineHDPlus: Site returned 403 (Cloudflare Protected). Skipping CineHDPlus.`);
@@ -31,11 +28,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     return [];
 
   } catch (error) {
-    if (error.name === 'AbortError') {
-      console.log('CineHDPlus: Request timed out due to Cloudflare connection blocking. Skipping.');
-    } else {
-      console.error('CineHDPlus access error:', error.message);
-    }
+    console.error('CineHDPlus access error:', error.message);
     return [];
   }
 }

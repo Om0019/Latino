@@ -1,6 +1,13 @@
 /**
  * Dean Edwards Unpacker Utility
  */
+const { decodeHtmlEntities, fetchTextWithTimeout, fetchWithTimeout, normalizeUrl } = require('./http');
+
+const PLAYER_FETCH_TIMEOUT_MS = 5000;
+const PELISPLUS_FETCH_TIMEOUT_MS = 4500;
+const MAX_RESOLVE_DEPTH = 5;
+const DOOD_DIRECT_TIMEOUT_MS = 1800;
+const FILEMOON_API_TIMEOUT_MS = 2200;
 
 function unpack(p, a, c, k, e, d) {
   const e_func = function(c) {
@@ -19,15 +26,54 @@ function unpack(p, a, c, k, e, d) {
  * Parses HTML, finds any packed scripts, unpacks them, and looks for .m3u8/.mp4 stream URLs.
  * Also scans the HTML directly for any un-packed stream URLs as a fallback.
  */
-function extractDirectStream(html) {
+function extractDirectStream(html, baseUrl) {
   if (!html) return null;
 
+  const normalizedHtml = decodeHtmlEntities(html).replace(/\\\//g, '/');
+
   // 1. Check for un-packed HLS/MP4 links directly first (e.g. goodstream, emturbovid)
-  const directRegex = /(https?:[^\s'"`<>]+?\.m3u8[^\s'"`<>]*|https?:[^\s'"`<>]+?\.mp4[^\s'"`<>]*)/gi;
-  const directMatches = html.match(directRegex) || [];
+  const directRegex = /(https?:[^\s'"`<>]+?\.(?:m3u8|mp4|mkv)[^\s'"`<>]*)/gi;
+  const protocolRelativeRegex = /(\/\/[^\s'"`<>]+?\.(?:m3u8|mp4|mkv)[^\s'"`<>]*)/gi;
+  const relativeRegex = /((?:\/|\.\/|\.\.\/)[^\s'"`<>]+?\.(?:m3u8|mp4|mkv)[^\s'"`<>]*)/gi;
+  const directMatches = normalizedHtml.match(directRegex) || [];
+  const protocolRelativeMatches = normalizedHtml.match(protocolRelativeRegex) || [];
+  const relativeMatches = normalizedHtml.match(relativeRegex) || [];
+
+  const configuredMatches = [];
+  const configPatterns = [
+    /(?:file|source|src|url)\s*[:=]\s*['"]([^'"]+\.(?:m3u8|mp4|mkv)[^'"]*)['"]/gi,
+    /["'](?:file|source|src|url)["']\s*:\s*["']([^"']+\.(?:m3u8|mp4|mkv)[^"']*)["']/gi,
+    /playerjs\.file\s*=\s*['"]([^'"]+)['"]/gi
+  ];
+
+  for (const pattern of configPatterns) {
+    let configMatch;
+    while ((configMatch = pattern.exec(normalizedHtml)) !== null) {
+      configuredMatches.push(configMatch[1]);
+    }
+  }
+
+  const base64Regex = /['"]([A-Za-z0-9+/=]{40,})['"]/g;
+  let encodedMatch;
+  while ((encodedMatch = base64Regex.exec(normalizedHtml)) !== null) {
+    try {
+      const decoded = Buffer.from(encodedMatch[1], 'base64').toString('utf8').replace(/\\\//g, '/');
+      if (!decoded.includes('.m3u8') && !decoded.includes('.mp4') && !decoded.includes('.mkv')) continue;
+      configuredMatches.push(...(decoded.match(directRegex) || []));
+      configuredMatches.push(...(decoded.match(protocolRelativeRegex) || []));
+      configuredMatches.push(...(decoded.match(relativeRegex) || []));
+    } catch {
+      // Ignore non-base64 player config strings.
+    }
+  }
   
   // Filter out non-video assets or ad servers
-  const validDirect = directMatches.filter(link => {
+  const validDirect = [
+    ...directMatches,
+    ...protocolRelativeMatches,
+    ...relativeMatches,
+    ...configuredMatches
+  ].map((link) => normalizeUrl(link, baseUrl)).filter(Boolean).filter(link => {
     const l = link.toLowerCase();
     return !l.includes('google-analytics')
       && !l.includes('analytics.js')
@@ -44,7 +90,7 @@ function extractDirectStream(html) {
   const packerRegex = /eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*d\s*\)[\s\S]*?\}\s*\(\s*(['"])([\s\S]*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(['"])([\s\S]*?)\5\.split\(['"]\|['"]\)/gi;
   
   let match;
-  while ((match = packerRegex.exec(html)) !== null) {
+  while ((match = packerRegex.exec(normalizedHtml)) !== null) {
     try {
       let p = match[2].trim();
       const a = parseInt(match[3]);
@@ -54,7 +100,7 @@ function extractDirectStream(html) {
       
       const unpacked = unpack(p, a, c, k, {}, {});
       const streamMatches = unpacked.match(directRegex) || [];
-      const validStreams = streamMatches.filter(link => {
+      const validStreams = streamMatches.map((link) => normalizeUrl(link, baseUrl)).filter(Boolean).filter(link => {
         const l = link.toLowerCase();
         return !l.includes('analytics')
           && !l.includes('ads')
@@ -73,7 +119,139 @@ function extractDirectStream(html) {
   return null;
 }
 
-module.exports = { extractDirectStream, unpack };
+function isHttpUrl(value) {
+  return /^https?:\/\//i.test(value || '');
+}
+
+function getHostname(value) {
+  try {
+    return new URL(value).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function isDoodHost(value) {
+  return /(^|\.)dood\.(?:li|to|stream|watch|so|pm|ws)$/i.test(getHostname(value));
+}
+
+function isFilemoonHost(value) {
+  return /(^|\.)filemoon\.(?:sx|to|in|nl|wt|eu|art)$/i.test(getHostname(value));
+}
+
+function isVoeHost(value) {
+  const host = getHostname(value);
+  return /(^|\.)voe\.sx$/i.test(host)
+    || host.includes('pamelachangemission.com');
+}
+
+function isWaawHost(value) {
+  const host = getHostname(value);
+  return /(^|\.)waaw\.to$/i.test(host);
+}
+
+function normalizeWaawEmbedUrl(url, referer) {
+  if (!isWaawHost(url)) return url;
+
+  try {
+    const parsed = new URL(url);
+    const match = parsed.pathname.match(/^\/f\/([^/?#]+)/i);
+    if (!match) return url;
+
+    const embedUrl = new URL(`/e/${match[1]}`, parsed.origin);
+    embedUrl.searchParams.set('http_referer', referer || 'https://tioplus.app/');
+    return embedUrl.toString();
+  } catch {
+    return url;
+  }
+}
+
+function extractWaawDirectStream(html, baseUrl) {
+  const directUrl = extractDirectStream(html, baseUrl);
+  if (!directUrl) return null;
+
+  const lower = directUrl.toLowerCase();
+  if (lower.startsWith('data:') || lower.includes('/hls-vod-s03/flv/api/files/videos/2018/08/01/')) {
+    return null;
+  }
+
+  return directUrl;
+}
+
+function rot13(value) {
+  return String(value || '').replace(/[a-zA-Z]/g, (char) => {
+    const base = char <= 'Z' ? 65 : 97;
+    return String.fromCharCode(((char.charCodeAt(0) - base + 13) % 26) + base);
+  });
+}
+
+function decodeVoePayload(encoded) {
+  try {
+    let value = rot13(encoded);
+    for (const marker of ['@$', '^^', '~@', '%?', '*~', '!!', '#&']) {
+      value = value.split(marker).join('_');
+    }
+
+    value = value.split('_').join('');
+    const firstDecoded = Buffer.from(value, 'base64').toString('binary');
+    let shifted = '';
+    for (let index = 0; index < firstDecoded.length; index += 1) {
+      shifted += String.fromCharCode(firstDecoded.charCodeAt(index) - 3);
+    }
+
+    const reversed = shifted.split('').reverse().join('');
+    const json = Buffer.from(reversed, 'base64').toString('utf8');
+    return JSON.parse(json);
+  } catch (error) {
+    console.warn(`Unpacker: VOE payload decode failed: ${error.message}`);
+    return null;
+  }
+}
+
+function extractVoeDirectStream(html, baseUrl) {
+  if (!html) return null;
+
+  const scriptRegex = /<script[^>]+type=["']application\/json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  let match;
+  while ((match = scriptRegex.exec(html)) !== null) {
+    try {
+      const payload = JSON.parse(match[1].trim());
+      const encoded = Array.isArray(payload) && typeof payload[0] === 'string' ? payload[0] : null;
+      if (!encoded) continue;
+
+      const data = decodeVoePayload(encoded);
+      if (!data) continue;
+
+      const fallback = Array.isArray(data.fallback) ? data.fallback.map((item) => item?.file) : [];
+      const candidates = [
+        data.source,
+        ...fallback,
+        data.direct_access_allowed ? data.direct_access_url : null
+      ].filter(Boolean);
+
+      const direct = candidates.find((candidate) => /\.(?:m3u8|mp4|mkv)(?:$|[?#])/i.test(candidate));
+      if (direct) return normalizeUrl(direct, baseUrl);
+    } catch {
+      // Ignore unrelated JSON script tags.
+    }
+  }
+
+  return null;
+}
+
+function isSupportedEmbedServer(server) {
+  return [
+    'vidhide',
+    'streamwish',
+    'hlswish',
+    'rapidvideo',
+    'filemoon',
+    'dood',
+    'doodstream',
+    'doodstreaming',
+    'voe'
+  ].includes((server || '').toLowerCase());
+}
 
 const crypto = require('crypto');
 
@@ -129,9 +307,9 @@ async function resolvePelisplus(embedUrl, userAgent, referer) {
     if (!hash) return null;
     
     const apiUrl = `https://${host}/api/v1/video?id=${hash}`;
-    const res = await fetch(apiUrl, {
+    const res = await fetchWithTimeout(apiUrl, {
       headers: { 'User-Agent': userAgent, 'Referer': referer || embedUrl, 'Origin': `https://${host}` }
-    });
+    }, PELISPLUS_FETCH_TIMEOUT_MS);
     if (!res.ok) return null;
     
     const hexData = await res.text();
@@ -166,10 +344,6 @@ async function resolvePelisplus(embedUrl, userAgent, referer) {
     return null;
   }
 }
-
-module.exports.resolvePelisplus = resolvePelisplus;
-
-
 
 function decryptEmbed69(html) {
   const powChallengeMatch = html.match(/const POW_CHALLENGE = '([^']+)';/);
@@ -248,45 +422,216 @@ function decryptEmbed69(html) {
   return decryptedLinks;
 }
 
-module.exports.decryptEmbed69 = decryptEmbed69;
+async function resolveDood(html, url, userAgent) {
+  if (!isDoodHost(url)) return null;
+
+  const passMatch = html.match(/(["'])(\/pass_md5\/[^"'<>]+)\1/i)
+    || html.match(/(["'])(https?:\/\/[^"'<>]+\/pass_md5\/[^"'<>]+)\1/i);
+  const passUrl = normalizeUrl(passMatch?.[2], url);
+  if (!passUrl) return null;
+
+  try {
+    const res = await fetchWithTimeout(passUrl, {
+      headers: {
+        'User-Agent': userAgent,
+        'Referer': url,
+        'X-Requested-With': 'XMLHttpRequest'
+      }
+    }, DOOD_DIRECT_TIMEOUT_MS);
+    if (!res.ok) return null;
+
+    const direct = (await res.text()).trim().replace(/\\\//g, '/');
+    if (/^https?:\/\/.+\.(?:m3u8|mp4|mkv)(?:$|[?#])/i.test(direct)) {
+      return direct;
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function base64UrlDecode(value) {
+  const normalized = String(value || '').replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+  return Buffer.from(padded, 'base64');
+}
+
+function getFilemoonKeyParts(payload) {
+  const keyParts = Array.isArray(payload?.key_parts) ? payload.key_parts : [];
+  const version = String(payload?.version || '').trim();
+  const versionNumber = Number(version);
+
+  if (
+    Number.isInteger(versionNumber)
+    && versionNumber >= 1
+    && versionNumber <= 20
+    && versionNumber <= keyParts.length
+    && (31 - versionNumber) <= keyParts.length
+  ) {
+    return [keyParts[versionNumber - 1], keyParts[30 - versionNumber]].filter(Boolean);
+  }
+
+  return keyParts;
+}
+
+function decryptFilemoonPayload(payload) {
+  const keyParts = getFilemoonKeyParts(payload).filter((part) => typeof part === 'string' && part.length > 0);
+  if (!keyParts.length || !payload?.iv || !payload?.payload) return null;
+
+  const key = Buffer.concat(keyParts.map(base64UrlDecode));
+  const iv = base64UrlDecode(payload.iv);
+  const encrypted = base64UrlDecode(payload.payload);
+  const tagLength = 16;
+  if (![16, 24, 32].includes(key.length) || encrypted.length <= tagLength) return null;
+
+  const ciphertext = encrypted.subarray(0, encrypted.length - tagLength);
+  const authTag = encrypted.subarray(encrypted.length - tagLength);
+  const decipher = crypto.createDecipheriv(`aes-${key.length * 8}-gcm`, key, iv);
+  decipher.setAuthTag(authTag);
+  const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  return JSON.parse(decrypted.toString('utf8'));
+}
+
+function extractFilemoonCode(url) {
+  try {
+    const parsed = new URL(url);
+    const match = parsed.pathname.match(/\/(?:e|d|file|download)\/([^/?#]+)/i);
+    return match?.[1] || null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveFilemoon(url, userAgent, referer) {
+  if (!isFilemoonHost(url)) return null;
+
+  const code = extractFilemoonCode(url);
+  if (!code) return null;
+
+  const apiPaths = [
+    `/api/videos/${encodeURIComponent(code)}/embed/playback`,
+    `/api/videos/${encodeURIComponent(code)}/playback`
+  ];
+
+  for (const path of apiPaths) {
+    try {
+      const apiUrl = new URL(path, url).toString();
+      const { res, text } = await fetchTextWithTimeout(apiUrl, {
+        headers: {
+          'User-Agent': userAgent,
+          'Referer': url,
+          'Origin': new URL(url).origin,
+          'Accept': 'application/json',
+          'X-Embed-Origin': referer ? getHostname(referer) : '',
+          'X-Embed-Referer': referer || url,
+          'X-Embed-Parent': referer || url
+        }
+      }, FILEMOON_API_TIMEOUT_MS);
+      if (!res.ok) continue;
+
+      const data = JSON.parse(text);
+      const playback = data.playback || data;
+      const decrypted = decryptFilemoonPayload(playback);
+      const sources = Array.isArray(decrypted?.sources) ? decrypted.sources : [];
+      const direct = sources
+        .map((source) => source?.url)
+        .find((sourceUrl) => /\.(m3u8|mp4|mkv)(?:$|[?#])/i.test(sourceUrl || ''));
+      if (direct) return normalizeUrl(direct, url);
+    } catch (error) {
+      console.warn(`Unpacker: Filemoon API resolve failed for ${url}: ${error.message}`);
+    }
+  }
+
+  return null;
+}
+
+function addVoePermanentToken(url) {
+  const token = process.env.VOE_PERMANENT_TOKEN;
+  if (!token || !isVoeHost(url)) return null;
+
+  try {
+    const parsed = new URL(url);
+    if (!parsed.searchParams.has('permanentToken')) {
+      parsed.searchParams.set('permanentToken', token);
+    }
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Advanced recursive player resolver.
  * Handles known external players (like embed69, vidhide, pelisplus, emturbovid etc)
  * to extract the final direct .m3u8/.mp4
  */
-async function resolvePlayerStream(url, userAgent, referer) {
-    try {
-        // Netu/Waaw "f" pages usually wrap the actual embed page.
-        if (url.includes('waaw.to/f/')) {
-            const waawUrl = new URL(url);
-            const match = waawUrl.pathname.match(/\/f\/([^/?#]+)/);
-            if (match && match[1]) {
-                const embedUrl = `https://waaw.to/e/${match[1]}?http_referer=${encodeURIComponent(referer || 'https://tioplus.app/')}`;
-                return await resolvePlayerStream(embedUrl, userAgent, referer);
-            }
-        }
+async function resolvePlayerStream(url, userAgent, referer, options = {}) {
+    const depth = options.depth || 0;
+    const visited = options.visited || new Set();
+    const normalizedInputUrl = normalizeUrl(url, referer);
+    if (!normalizedInputUrl || depth > MAX_RESOLVE_DEPTH || visited.has(normalizedInputUrl)) {
+        return null;
+    }
+    visited.add(normalizedInputUrl);
+    url = normalizeWaawEmbedUrl(normalizedInputUrl, referer);
+    if (visited.has(url) && url !== normalizedInputUrl) {
+        return null;
+    }
+    visited.add(url);
 
+    try {
         // Pelisplus SPA players (upns, 4meplayer, strp2p)
         if (url.includes('pelisplus.upns.pro') || url.includes('4meplayer.pro') || url.includes('strp2p.com')) {
             const m3u8 = await resolvePelisplus(url, userAgent, referer);
             if (m3u8) return m3u8;
         }
 
-        const res = await fetch(url, {
+        if (isFilemoonHost(url)) {
+            const directUrl = await resolveFilemoon(url, userAgent, referer);
+            if (directUrl) return directUrl;
+        }
+
+        const { res, text: html } = await fetchTextWithTimeout(url, {
             headers: { 'User-Agent': userAgent, 'Referer': referer }
-        });
+        }, PLAYER_FETCH_TIMEOUT_MS);
         if (!res.ok) return null;
-        
-        const html = await res.text();
+
+        if (isVoeHost(url) && html.includes('generate-token') && !url.includes('permanentToken=')) {
+            const tokenUrl = addVoePermanentToken(url);
+            if (tokenUrl && tokenUrl !== url) {
+                return await resolvePlayerStream(tokenUrl, userAgent, referer, { depth: depth + 1, visited });
+            }
+        }
+
+        if (isVoeHost(url)) {
+            const voeDirectUrl = extractVoeDirectStream(html, url);
+            if (voeDirectUrl) return voeDirectUrl;
+        }
+
+        if (isWaawHost(url)) {
+            const waawDirectUrl = extractWaawDirectStream(html, url);
+            if (waawDirectUrl) return waawDirectUrl;
+
+            const iframeMatch = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
+            const iframeUrl = normalizeUrl(iframeMatch?.[1], url);
+            if (iframeUrl && iframeUrl !== url && isWaawHost(iframeUrl)) {
+                return await resolvePlayerStream(iframeUrl, userAgent, url, { depth: depth + 1, visited });
+            }
+
+            return null;
+        }
         
         // emturbovid / turbovidhls: extract m3u8 from data-hash attribute or urlPlay variable
         if (url.includes('emturbovid') || url.includes('turbovidhls') || url.includes('turboviplay')) {
             const dataHash = html.match(/data-hash=["']([^"']+\.m3u8[^"']*)/);
-            if (dataHash) return dataHash[1];
+            if (dataHash) return normalizeUrl(dataHash[1], url);
             const urlPlay = html.match(/var\s+urlPlay\s*=\s*["']([^"']+\.m3u8[^"']*)/);
-            if (urlPlay) return urlPlay[1];
+            if (urlPlay) return normalizeUrl(urlPlay[1], url);
         }
+
+        const doodDirectUrl = await resolveDood(html, url, userAgent);
+        if (doodDirectUrl) return doodDirectUrl;
 
         // Check if it's embed69
         if (url.includes('embed69')) {
@@ -294,19 +639,22 @@ async function resolvePlayerStream(url, userAgent, referer) {
             if (embed69Links && embed69Links.length > 0) {
                 // Try resolving the first valid video embed (e.g. vidhide)
                 const rankedEmbeds = embed69Links.sort((a, b) => {
-                    const kindScore = (value) => value.kind === 'download' ? 0 : 1;
+                    const kindScore = (value) => value.kind === 'video' ? 0 : 1;
                     const serverScore = (value) => {
-                        if (value.server === 'vidhide' || value.server === 'streamwish') return 0;
-                        if (value.server === 'filemoon' || value.server === 'rapidvideo') return 1;
-                        if (value.server === 'voe') return 3;
+                        const server = (value.server || '').toLowerCase();
+                        if (server === 'vidhide' || server === 'streamwish' || server === 'hlswish') return 0;
+                        if (server === 'rapidvideo') return 1;
+                        if (server === 'filemoon') return 2;
+                        if (server === 'dood' || server === 'doodstream' || server === 'doodstreaming') return 3;
+                        if (server === 'voe') return 5;
                         return 2;
                     };
                     return kindScore(a) - kindScore(b) || serverScore(a) - serverScore(b);
                 });
 
                 for (const embed of rankedEmbeds) {
-                    if (embed.server === 'vidhide' || embed.server === 'streamwish' || embed.server === 'voe' || embed.server === 'filemoon' || embed.server === 'rapidvideo') {
-                        const directUrl = await resolvePlayerStream(embed.url, userAgent, url);
+                    if (isSupportedEmbedServer(embed.server)) {
+                        const directUrl = await resolvePlayerStream(embed.url, userAgent, url, { depth: depth + 1, visited });
                         if (directUrl) return directUrl;
                     }
                 }
@@ -314,15 +662,23 @@ async function resolvePlayerStream(url, userAgent, referer) {
         }
         
         // Check for JS redirect (e.g. VOE initial page)
-        const jsRedirectMatch = html.match(/window\.location\.href\s*=\s*['"](https?:\/\/[^'"]+)['"]/);
-        if (jsRedirectMatch && jsRedirectMatch[1] !== url) {
-            console.log(`Unpacker: Following JS redirect to ${jsRedirectMatch[1]}`);
-            return await resolvePlayerStream(jsRedirectMatch[1], userAgent, referer);
+        const jsRedirectMatch = html.match(/(?:(?:window|self)\.)?location(?:\.href)?\s*=\s*['"]([^'"]+)['"]|(?:(?:window|self)\.)?location\.(?:replace|assign)\s*\(\s*['"]([^'"]+)['"]\s*\)/);
+        const redirectUrl = normalizeUrl(jsRedirectMatch?.[1] || jsRedirectMatch?.[2], url);
+        if (redirectUrl && redirectUrl !== url && isHttpUrl(redirectUrl)) {
+            console.log(`Unpacker: Following JS redirect to ${redirectUrl}`);
+            return await resolvePlayerStream(redirectUrl, userAgent, referer, { depth: depth + 1, visited });
+        }
+
+        const iframeMatch = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
+        const iframeUrl = normalizeUrl(iframeMatch?.[1], url);
+        if (iframeUrl && iframeUrl !== url && isHttpUrl(iframeUrl)) {
+            const directUrl = await resolvePlayerStream(iframeUrl, userAgent, url, { depth: depth + 1, visited });
+            if (directUrl) return directUrl;
         }
 
         // Standard dean-edwards / direct extraction
-        const directUrl = extractDirectStream(html);
-        if (directUrl) return directUrl;
+        const directUrl = extractDirectStream(html, url);
+        if (directUrl) return normalizeUrl(directUrl, url);
 
         return null;
     } catch (e) {
@@ -331,4 +687,10 @@ async function resolvePlayerStream(url, userAgent, referer) {
     }
 }
 
-module.exports.resolvePlayerStream = resolvePlayerStream;
+module.exports = {
+  decryptEmbed69,
+  extractDirectStream,
+  resolvePelisplus,
+  resolvePlayerStream,
+  unpack
+};

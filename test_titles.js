@@ -6,7 +6,7 @@ async function testTitle(type, tmdbId, imdbId, name, year, season, episode) {
     console.log(`==============================================`);
     
     try {
-        const streams = await getStreams(type, tmdbId, imdbId, season, episode, name, year);
+        const streams = await getStreams(type, `tmdb:${type}:${tmdbId}`, season, episode);
         
         console.log(`\n✅ Total Working Streams Found: ${streams.length}`);
         

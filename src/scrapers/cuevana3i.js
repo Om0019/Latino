@@ -1,7 +1,10 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
-const PLAYER_CONCURRENCY = 3;
+const { fetchWithTimeout } = require('../http');
+const PLAYER_CONCURRENCY = 5;
 const PLAYER_RESOLVE_TIMEOUT_MS = 1800;
+const PAGE_TIMEOUT_MS = 5000;
+const PROBE_TIMEOUT_MS = 2500;
 
 function cleanText(str) {
   if (!str) return '';
@@ -88,9 +91,51 @@ function extractWrapperUrls(html) {
   return [...new Set(matches)];
 }
 
+function isTokenWrapper(wrapperUrl) {
+  try {
+    return new URL(wrapperUrl).searchParams.has('token');
+  } catch {
+    return false;
+  }
+}
+
+function sortWrapperUrls(wrapperUrls) {
+  const tokenWrappers = wrapperUrls.filter(isTokenWrapper);
+  const otherWrappers = wrapperUrls.filter((url) => !isTokenWrapper(url));
+
+  if (tokenWrappers.length > 0) {
+    return tokenWrappers;
+  }
+
+  return otherWrappers.slice(0, 2);
+}
+
 function decodeWrapperUrl(wrapperUrl) {
   try {
     const parsed = new URL(wrapperUrl);
+    const token = parsed.searchParams.get('token');
+    if (token) {
+      const servers = {
+        1: 'https://tiktokshopping.xyz/v/',
+        2: 'https://filemoon.sx/e/',
+        3: 'https://martinshop.xyz/e/',
+        4: 'https://dood.li/e/'
+      };
+      const baseUrl = servers[token[0]];
+      if (baseUrl) {
+        const key = 'a45f04ce-2394-47c3-b718-0ecd97ce51d6';
+        const decoded = Buffer.from(token.slice(1), 'base64').toString('binary');
+        let decrypted = '';
+        for (let i = 0; i < decoded.length; i++) {
+          decrypted += String.fromCharCode(decoded.charCodeAt(i) ^ key.charCodeAt(i % key.length));
+        }
+
+        if (decrypted) {
+          return baseUrl + decrypted;
+        }
+      }
+    }
+
     const v = parsed.searchParams.get('v');
     if (v) {
       const decoded = Buffer.from(v, 'base64').toString('utf8').trim();
@@ -107,9 +152,9 @@ function decodeWrapperUrl(wrapperUrl) {
 
 async function probePage(candidate, userAgent) {
   try {
-    const res = await fetch(candidate.url, {
+    const res = await fetchWithTimeout(candidate.url, {
       headers: { 'User-Agent': userAgent }
-    });
+    }, PROBE_TIMEOUT_MS);
 
     if (!res.ok) return null;
     return candidate;
@@ -142,9 +187,9 @@ async function scrape(title, originalTitle, year, type, season, episode) {
       ? `${bestMatch.url}/episodio-${season}x${episode}`
       : bestMatch.url;
 
-    const pageRes = await fetch(targetPageUrl, {
+    const pageRes = await fetchWithTimeout(targetPageUrl, {
       headers: { 'User-Agent': userAgent }
-    });
+    }, PAGE_TIMEOUT_MS);
     if (!pageRes.ok) {
       console.warn(`Cuevana3i: Failed to fetch target page ${targetPageUrl} (${pageRes.status})`);
       return [];
@@ -153,7 +198,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     const pageHtml = await pageRes.text();
     const pageDoc = cheerio.load(pageHtml);
 
-    const wrapperUrls = extractWrapperUrls(pageHtml);
+    const wrapperUrls = sortWrapperUrls(extractWrapperUrls(pageHtml));
     console.log(`Cuevana3i: Found ${wrapperUrls.length} player wrappers`);
 
     const streams = await mapWithConcurrency(wrapperUrls, PLAYER_CONCURRENCY, async (wrapperUrl, index) => {

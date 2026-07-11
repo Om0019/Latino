@@ -1,5 +1,6 @@
 const TMDB_API_KEY = 'af3fa2d2239e9d0e6c04a1076d3df76f';
 const TMDB_BASE_URL = 'https://api.themoviedb.org/3';
+const TMDB_TIMEOUT_MS = 5000;
 
 /**
  * Helper to fetch JSON from TMDB API with optional language fallback.
@@ -11,7 +12,21 @@ async function fetchFromTMDB(path, params = {}) {
   });
   
   const url = `${TMDB_BASE_URL}${path}?${queryParams.toString()}`;
-  const response = await fetch(url);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), TMDB_TIMEOUT_MS);
+
+  let response;
+  try {
+    response = await fetch(url, { signal: controller.signal });
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      throw new Error(`TMDB API timeout after ${TMDB_TIMEOUT_MS}ms at ${path}`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
   if (!response.ok) {
     throw new Error(`TMDB API Error: ${response.status} ${response.statusText} at ${path}`);
   }

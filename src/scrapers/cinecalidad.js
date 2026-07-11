@@ -1,5 +1,10 @@
 const cheerio = require('cheerio');
 const unpacker = require('../unpacker');
+const { fetchWithTimeout } = require('../http');
+
+const SEARCH_TIMEOUT_MS = 4500;
+const PAGE_TIMEOUT_MS = 5500;
+const VALIDATION_TIMEOUT_MS = 2500;
 
 function cleanText(str) {
   if (!str) return '';
@@ -54,7 +59,7 @@ function extractExternalDownloadLinks(movieDoc) {
     if (!/mediafire|1fichier|megaup|fireload/i.test(serverName + ' ' + href)) return;
     if (seen.has(href)) return;
     seen.add(href);
-    links.push({ externalUrl: href, serverName });
+    links.push({ downloadUrl: href, serverName });
   });
 
   return links;
@@ -62,14 +67,14 @@ function extractExternalDownloadLinks(movieDoc) {
 
 async function isPlayableDownloadTarget(url, userAgent, referer) {
   try {
-    const res = await fetch(url, {
+    const res = await fetchWithTimeout(url, {
       method: 'HEAD',
       redirect: 'manual',
       headers: {
         'User-Agent': userAgent,
         'Referer': referer
       }
-    });
+    }, VALIDATION_TIMEOUT_MS);
 
     const contentType = (res.headers.get('content-type') || '').toLowerCase();
     const contentDisposition = (res.headers.get('content-disposition') || '').toLowerCase();
@@ -94,12 +99,12 @@ async function isPlayableDownloadTarget(url, userAgent, referer) {
 
 async function resolveDownloadPage(downloadPageUrl, userAgent, referer) {
   try {
-    const res = await fetch(downloadPageUrl, {
+    const res = await fetchWithTimeout(downloadPageUrl, {
       headers: {
         'User-Agent': userAgent,
         'Referer': referer
       }
-    });
+    }, PAGE_TIMEOUT_MS);
     if (!res.ok) return null;
 
     const html = await res.text();
@@ -123,9 +128,9 @@ async function scrape(title, originalTitle, year, type, season, episode) {
 
   async function performSearch(searchQuery) {
     const searchUrl = `https://www.cinecalidad.am/?s=${encodeURIComponent(searchQuery)}`;
-    const res = await fetch(searchUrl, {
+    const res = await fetchWithTimeout(searchUrl, {
       headers: { 'User-Agent': userAgent }
-    });
+    }, SEARCH_TIMEOUT_MS);
     if (!res.ok) return [];
 
     const html = await res.text();
@@ -133,14 +138,14 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     const results = [];
 
     $('a').each((i, el) => {
-      const href = $(el).attr('href');
+      const href = $(el).attr('href') || '';
       const text = $(el).text().trim();
       const titleAttr = $(el).attr('title') || '';
       
       const isMovieLink = href.includes('/ver-pelicula/') || href.includes('/pelicula/');
       const isSeriesLink = href.includes('/ver-serie/') || href.includes('/serie/');
 
-      if (href && (isMovieLink || isSeriesLink)) {
+      if (isMovieLink || isSeriesLink) {
         if ((type === 'movie' && isMovieLink) || (type === 'series' && isSeriesLink)) {
           const fullTitle = titleAttr || text;
           if (fullTitle) {
@@ -223,9 +228,9 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     console.log(`Cinecalidad: Matched target page: ${bestMatch.title} (${targetPageUrl})`);
 
     // Fetch movie page to get player tabs
-    const movieRes = await fetch(targetPageUrl, {
+    const movieRes = await fetchWithTimeout(targetPageUrl, {
       headers: { 'User-Agent': userAgent }
-    });
+    }, PAGE_TIMEOUT_MS);
     if (!movieRes.ok) return [];
 
     const movieHtml = await movieRes.text();
@@ -315,14 +320,14 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     }
 
     for (const link of externalDownloadLinks) {
-      const isPlayable = await isPlayableDownloadTarget(link.externalUrl, userAgent, targetPageUrl);
+      const isPlayable = await isPlayableDownloadTarget(link.downloadUrl, userAgent, targetPageUrl);
       if (!isPlayable) continue;
 
-      if (!streams.some((stream) => stream.url === link.externalUrl)) {
+      if (!streams.some((stream) => stream.url === link.downloadUrl)) {
         streams.push({
           name: 'Cinecalidad',
           title: `⬇ ${link.serverName}`,
-          url: link.externalUrl,
+          url: link.downloadUrl,
           behaviorHints: {
             notWebReady: true,
             proxyHeaders: {
