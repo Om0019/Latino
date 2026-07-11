@@ -102,6 +102,19 @@ function buildFallbackUrls(type, title, originalTitle) {
   return candidates;
 }
 
+function scorePlayerToken(playerInfo) {
+  const label = (playerInfo.name || '').toLowerCase();
+
+  if (label.includes('latino') || label.includes('slplayer') || label.includes('servidor 1')) return 0;
+  if (label.includes('premium')) return 3;
+  if (label.includes('vip')) return 7;
+  return 4;
+}
+
+function sortPlayerTokens(playerTokens) {
+  return [...playerTokens].sort((a, b) => scorePlayerToken(a) - scorePlayerToken(b));
+}
+
 async function mapWithConcurrency(items, concurrency, worker) {
   const results = [];
   let index = 0;
@@ -287,9 +300,10 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     });
 
     console.log(`SoloLatino: Found ${playerTokens.length} player tokens`);
+    const sortedPlayerTokens = sortPlayerTokens(playerTokens);
 
     // 4. Query the /api/player-url endpoint for each token
-    const streams = await mapWithConcurrency(playerTokens, TOKEN_CONCURRENCY, async (pInfo) => {
+    const streams = await mapWithConcurrency(sortedPlayerTokens, TOKEN_CONCURRENCY, async (pInfo) => {
       try {
         const apiRes = await fetchWithTimeout('https://sololatino.net/api/player-url', {
           method: 'POST',

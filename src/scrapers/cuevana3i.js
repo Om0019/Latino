@@ -104,10 +104,27 @@ function sortWrapperUrls(wrapperUrls) {
   const otherWrappers = wrapperUrls.filter((url) => !isTokenWrapper(url));
 
   if (tokenWrappers.length > 0) {
-    return tokenWrappers;
+    return [...tokenWrappers].sort((a, b) => scoreDecodedWrapper(a) - scoreDecodedWrapper(b));
   }
 
   return otherWrappers.slice(0, 2);
+}
+
+function scoreDecodedWrapper(wrapperUrl) {
+  const decodedUrl = decodeWrapperUrl(wrapperUrl) || wrapperUrl;
+  const host = (() => {
+    try {
+      return new URL(decodedUrl).hostname.toLowerCase();
+    } catch {
+      return '';
+    }
+  })();
+
+  if (host.includes('tiktokshopping.xyz')) return 0;
+  if (host.includes('filemoon')) return 7;
+  if (host.includes('dood')) return 8;
+  if (host.includes('vidlink.pro') || host.includes('vidapi.xyz') || host.includes('videasy') || host.includes('vsembed')) return 9;
+  return 4;
 }
 
 function decodeWrapperUrl(wrapperUrl) {

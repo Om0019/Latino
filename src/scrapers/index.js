@@ -6,16 +6,24 @@ const cinehdplus = require('./cinehdplus');
 const cuevana3i = require('./cuevana3i');
 const { fetchWithTimeout, normalizeUrl } = require('../http');
 
-const SCRAPER_TIMEOUT_MS = 11000;
+const SCRAPER_TIMEOUT_MS = 10000;
 const SOLOLATINO_TIMEOUT_MS = 12000;
-const SCRAPER_COLLECTION_TIMEOUT_MS = 12500;
+const SCRAPER_COLLECTION_TIMEOUT_MS = 11500;
+const FAST_SOURCE_MIN_WAIT_MS = 3500;
+const FAST_SOURCE_MIN_STREAMS = 3;
+const FAST_SOURCE_MIN_SOURCES = 1;
 const STREAM_VALIDATION_TIMEOUT_MS = 5000;
-const STREAM_VALIDATION_TOTAL_TIMEOUT_MS = 5500;
-const STREAM_CACHE_TTL_MS = 90 * 1000;
+const STREAM_VALIDATION_TOTAL_TIMEOUT_MS = 4000;
+const STREAM_VALIDATION_FAST_TIMEOUT_MS = 2200;
+const MAX_VALIDATION_CANDIDATES = 6;
+const STREAM_CACHE_TTL_MS = 10 * 60 * 1000;
 const ENABLE_CINEHDPLUS = false;
+const HOST_HEALTH_TTL_MS = 5 * 60 * 1000;
+const HOST_HEALTH_MAX_PENALTY = 5;
 
 const streamCache = new Map();
 const inFlightRequests = new Map();
+const hostHealth = new Map();
 
 function getStreamHost(stream) {
   try {
@@ -39,21 +47,55 @@ function isKnownBadStream(stream) {
     || name.includes('torrent');
 }
 
+function getHostHealth(host) {
+  const health = hostHealth.get(host);
+  if (!health) return { penalty: 0 };
+
+  if (health.expiresAt <= Date.now()) {
+    hostHealth.delete(host);
+    return { penalty: 0 };
+  }
+
+  return health;
+}
+
+function recordHostHealth(stream, playable) {
+  const host = getStreamHost(stream);
+  if (!host) return;
+
+  const current = getHostHealth(host);
+  const penalty = playable
+    ? Math.max(0, (current.penalty || 0) - 1)
+    : Math.min(HOST_HEALTH_MAX_PENALTY, (current.penalty || 0) + 1);
+
+  if (penalty === 0) {
+    hostHealth.delete(host);
+    return;
+  }
+
+  hostHealth.set(host, {
+    penalty,
+    expiresAt: Date.now() + HOST_HEALTH_TTL_MS
+  });
+}
+
 function scoreStream(stream) {
   const host = getStreamHost(stream);
   const title = (stream.title || '').toLowerCase();
-  const name = (stream.name || '').toLowerCase();
+  const healthPenalty = getHostHealth(host).penalty || 0;
+  let baseScore = 9;
 
-  if (name === 'sololatino' && title.includes('premium')) return 0;
-  if (name === 'cinecalidad' && title.includes('vimeos')) return 1;
-  if (host.includes('mediafire.com') || host.includes('fireload.com')) return 2;
-  if (name === 'sololatino') return 3;
-  if (name === 'cinecalidad' && title.includes('goodstream')) return 7;
-  if (name === 'tioplus' && title.includes('opción 1')) return 8;
-  if (host.includes('dramiyos-cdn.com') || host.includes('cfglobalcdn.com') || host.includes('turboviplay.com') || host.includes('premilkyway.com')) return 4;
-  if (host.includes('acek-cdn.com')) return 5;
-  if (host.includes('vimeos') || host.includes('goodstream')) return 6;
-  return 9;
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) baseScore = 0;
+  else if (host.includes('turboviplay.com')) baseScore = 1;
+  else if (host.includes('vimeos')) baseScore = 2;
+  else if (host.includes('acek-cdn.com')) baseScore = 3;
+  else if (host.includes('dramiyos-cdn.com') || host.includes('cfglobalcdn.com')) baseScore = 4;
+  else if (host.includes('mediafire.com') || host.includes('fireload.com')) baseScore = 5;
+  else if (host.includes('goodstream')) baseScore = 6;
+  else if (host.includes('premilkyway.com') || title.includes('hlswish')) baseScore = 7;
+  else if (host.includes('cdn-tnmr.org')) baseScore = 8;
+
+  return baseScore + healthPenalty;
 }
 
 function sortStreams(streams) {
@@ -95,6 +137,29 @@ function withTimeout(promise, timeoutMs, label) {
 async function collectScraperResults(tasks, timeoutMs) {
   const results = [];
   let pending = tasks.length;
+  let fastReturnEnabled = false;
+  let resolveFastReturn;
+
+  const hasEnoughStreamsForFastReturn = () => {
+    const fulfilledWithStreams = results.filter((result) => (
+      result.status === 'fulfilled'
+      && Array.isArray(result.value)
+      && result.value.length > 0
+    ));
+    const streamCount = fulfilledWithStreams.reduce((total, result) => total + result.value.length, 0);
+    return fulfilledWithStreams.length >= FAST_SOURCE_MIN_SOURCES
+      && streamCount >= FAST_SOURCE_MIN_STREAMS;
+  };
+
+  const fastReturnPromise = new Promise((resolve) => {
+    resolveFastReturn = resolve;
+    setTimeout(() => {
+      fastReturnEnabled = true;
+      if (hasEnoughStreamsForFastReturn()) {
+        resolve('enough-streams');
+      }
+    }, FAST_SOURCE_MIN_WAIT_MS);
+  });
 
   const trackedTasks = tasks.map((task) => (
     task.promise
@@ -103,13 +168,17 @@ async function collectScraperResults(tasks, timeoutMs) {
       .then((result) => {
         results.push(result);
         pending -= 1;
+        if (fastReturnEnabled && hasEnoughStreamsForFastReturn()) {
+          resolveFastReturn('enough-streams');
+        }
         return result;
       })
   ));
 
-  await Promise.race([
-    Promise.all(trackedTasks),
-    new Promise((resolve) => setTimeout(resolve, timeoutMs))
+  const completionReason = await Promise.race([
+    Promise.all(trackedTasks).then(() => 'complete'),
+    new Promise((resolve) => setTimeout(() => resolve('timeout'), timeoutMs)),
+    fastReturnPromise
   ]);
 
   if (pending > 0) {
@@ -117,7 +186,8 @@ async function collectScraperResults(tasks, timeoutMs) {
       .filter((task) => !results.some((result) => result.name === task.name))
       .map((task) => task.name)
       .join(', ');
-    console.warn(`Scraper orchestrator: Returning partial results; still waiting on ${pendingNames}`);
+    const reason = completionReason === 'enough-streams' ? 'fast response target met' : 'timeout';
+    console.warn(`Scraper orchestrator: Returning partial results (${reason}); still waiting on ${pendingNames}`);
   }
 
   return results;
@@ -170,49 +240,78 @@ async function isPlayableStream(stream) {
 
     if ([401, 403, 404, 410, 451].includes(response.status)) {
       console.log(`Scraper orchestrator: Filtering unplayable stream (${response.status}): ${stream.url}`);
+      recordHostHealth(stream, false);
       return false;
     }
 
     if (!response.ok && response.status !== 206) {
       console.log(`Scraper orchestrator: Filtering stream with bad validation status (${response.status}): ${stream.url}`);
+      recordHostHealth(stream, false);
       return false;
     }
 
     if (stream.url.toLowerCase().includes('.m3u8')) {
-      if (isHtmlResponse(response)) return false;
+      if (isHtmlResponse(response)) {
+        recordHostHealth(stream, false);
+        return false;
+      }
       const body = await response.text();
-      return body.includes('#EXTM3U') || body.includes('#EXT-X-STREAM-INF') || body.includes('#EXTINF');
+      const playable = body.includes('#EXTM3U') || body.includes('#EXT-X-STREAM-INF') || body.includes('#EXTINF');
+      recordHostHealth(stream, playable);
+      return playable;
     }
 
     if (isHtmlResponse(response) && !looksLikePlayableUrl(response.url || stream.url)) {
+      recordHostHealth(stream, false);
       return false;
     }
 
-    return looksLikePlayableUrl(response.url || stream.url)
+    const playable = looksLikePlayableUrl(response.url || stream.url)
       || (response.headers.get('content-type') || '').toLowerCase().startsWith('video/')
       || (response.headers.get('content-disposition') || '').toLowerCase().includes('attachment');
+    recordHostHealth(stream, playable);
+    return playable;
   } catch (error) {
     console.log(`Scraper orchestrator: Filtering stream that failed validation: ${stream.url} (${error.message})`);
+    recordHostHealth(stream, false);
     return false;
   }
 }
 
 async function validatePlayableStreams(streams) {
+  const sortedStreams = sortStreams(streams);
+  const streamsToValidate = sortedStreams.slice(0, MAX_VALIDATION_CANDIDATES);
+  const remainingStreams = sortedStreams.slice(MAX_VALIDATION_CANDIDATES);
   const validationPromise = Promise.all(
-    streams.map(async (stream) => ((await isPlayableStream(stream)) ? stream : null))
+    streamsToValidate.map(async (stream) => ((await isPlayableStream(stream)) ? stream : null))
   );
 
   const timeoutPromise = new Promise((resolve) => {
-    setTimeout(() => resolve(null), STREAM_VALIDATION_TOTAL_TIMEOUT_MS);
+    const timeoutMs = remainingStreams.length > 0
+      ? STREAM_VALIDATION_FAST_TIMEOUT_MS
+      : STREAM_VALIDATION_TOTAL_TIMEOUT_MS;
+    setTimeout(() => resolve(null), timeoutMs);
   });
 
   const result = await Promise.race([validationPromise, timeoutPromise]);
   if (!result) {
     console.warn('Scraper orchestrator: Stream validation timed out; returning URL-sanitized streams.');
-    return streams;
+    return sortedStreams;
   }
 
-  return result.filter(Boolean);
+  const playableStreams = result.filter(Boolean);
+  if (playableStreams.length > 0) {
+    return playableStreams;
+  }
+
+  if (remainingStreams.length > 0) {
+    return remainingStreams;
+  }
+
+  if (sortedStreams.length > 0) {
+    console.warn('Scraper orchestrator: Validation rejected all candidates; returning URL-sanitized streams to avoid a false empty result.');
+  }
+  return sortedStreams;
 }
 
 /**

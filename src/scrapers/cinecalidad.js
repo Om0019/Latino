@@ -5,6 +5,9 @@ const { fetchWithTimeout } = require('../http');
 const SEARCH_TIMEOUT_MS = 4500;
 const PAGE_TIMEOUT_MS = 5500;
 const VALIDATION_TIMEOUT_MS = 2500;
+const PLAYER_FAST_MIN_WAIT_MS = 1000;
+const PLAYER_FAST_MIN_STREAMS = 1;
+const PLAYER_COLLECTION_TIMEOUT_MS = 7500;
 
 function cleanText(str) {
   if (!str) return '';
@@ -117,6 +120,56 @@ async function resolveDownloadPage(downloadPageUrl, userAgent, referer) {
   } catch (error) {
     console.error(`Cinecalidad: Error resolving download page ${downloadPageUrl}:`, error.message);
     return null;
+  }
+}
+
+function scorePlayerOption(option) {
+  const text = `${option.serverName || ''} ${option.playerUrl || ''}`.toLowerCase();
+
+  if (text.includes('vimeos')) return 0;
+  if (text.includes('goodstream')) return 1;
+  if (text.includes('hlswish') || text.includes('streamwish')) return 2;
+  if (text.includes('filemoon')) return 8;
+  if (text.includes('voe')) return 9;
+  if (text.includes('waaw')) return 10;
+  return 5;
+}
+
+function sortPlayerOptions(playerOptions) {
+  return [...playerOptions].sort((a, b) => scorePlayerOption(a) - scorePlayerOption(b));
+}
+
+async function waitForPlayerResolvers(playerPromises, streams) {
+  let fastReturnEnabled = false;
+  let resolveFastReturn;
+
+  const fastReturnPromise = new Promise((resolve) => {
+    resolveFastReturn = resolve;
+    setTimeout(() => {
+      fastReturnEnabled = true;
+      if (streams.length >= PLAYER_FAST_MIN_STREAMS) {
+        resolve('enough-streams');
+      }
+    }, PLAYER_FAST_MIN_WAIT_MS);
+  });
+
+  const trackedPromises = playerPromises.map((promise) => (
+    promise.finally(() => {
+      if (fastReturnEnabled && streams.length >= PLAYER_FAST_MIN_STREAMS) {
+        resolveFastReturn('enough-streams');
+      }
+    })
+  ));
+
+  const completed = await Promise.race([
+    Promise.allSettled(trackedPromises).then(() => 'complete'),
+    new Promise((resolve) => setTimeout(() => resolve('timeout'), PLAYER_COLLECTION_TIMEOUT_MS)),
+    fastReturnPromise
+  ]);
+
+  if (completed !== 'complete') {
+    const reason = completed === 'enough-streams' ? 'fast player target met' : 'timeout';
+    console.warn(`Cinecalidad: Returning ${streams.length} resolved player streams (${reason}); slow wrappers still pending.`);
   }
 }
 
@@ -257,13 +310,14 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     });
 
     console.log(`Cinecalidad: Found ${playerOptions.length} player options. Fetching stream sources...`);
+    const sortedPlayerOptions = sortPlayerOptions(playerOptions);
 
     const streams = [];
     const downloadPageLinks = extractDownloadPageLinks(movieDoc);
     const externalDownloadLinks = extractExternalDownloadLinks(movieDoc);
 
     // Concurrently fetch player pages and extract direct video streams
-    const playerPromises = playerOptions.map(async (opt) => {
+    const playerPromises = sortedPlayerOptions.map(async (opt) => {
       try {
         const directUrl = await unpacker.resolvePlayerStream(opt.playerUrl, userAgent, targetPageUrl);
 
@@ -289,7 +343,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
       }
     });
 
-    await Promise.all(playerPromises);
+    await waitForPlayerResolvers(playerPromises, streams);
 
     const downloadTargets = await Promise.all(
       downloadPageLinks.map(async (downloadLink) => {
@@ -341,8 +395,9 @@ async function scrape(title, originalTitle, year, type, season, episode) {
       }
     }
 
-    console.log(`Cinecalidad: Resolved ${streams.length} stream options`);
-    return streams;
+    const resolvedStreams = [...streams];
+    console.log(`Cinecalidad: Resolved ${resolvedStreams.length} stream options`);
+    return resolvedStreams;
 
   } catch (error) {
     console.error(`Cinecalidad scrape error for "${title}":`, error.message);

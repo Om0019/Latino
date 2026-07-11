@@ -172,6 +172,7 @@ app.get('/stream/:type/:id.json', async (req, res) => {
   try {
     const streams = await scrapers.getStreams(type, cleanId, season, episode);
     const responseStreams = wrapProxyStreams(streams || [], req);
+    console.log(`Stream response: ${responseStreams.length} streams for ${type}/${cleanId}`);
     
     // If no streams found, return empty array (Stremio format)
     res.json({ streams: responseStreams });

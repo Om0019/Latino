@@ -5,10 +5,36 @@ const TOKEN_CONCURRENCY = 4;
 const SEARCH_TIMEOUT_MS = 4500;
 const PAGE_TIMEOUT_MS = 5500;
 const PROBE_TIMEOUT_MS = 2500;
+const TOKEN_FAST_MIN_RESULTS = 3;
+const TOKEN_FAST_MIN_WAIT_MS = 2500;
+const TOKEN_COLLECTION_TIMEOUT_MS = 6500;
 
 function isP2POption(value) {
   const text = String(value || '').toLowerCase();
   return text.includes('p2p') || text.includes('torrent') || text.includes('strp2p.com');
+}
+
+function scoreServerToken(serverInfo) {
+  const name = (serverInfo.name || '').toLowerCase();
+  const decodedUrl = b64_to_utf8(serverInfo.token).toLowerCase();
+  const text = `${name} ${decodedUrl}`;
+
+  if (isP2POption(text)) return 100;
+  if (text.includes('upfast') || text.includes('player') || text.includes('pelisplus.upns.pro') || text.includes('4meplayer.pro')) return 0;
+  if (text.includes('tioplus') || text.includes('plus') || text.includes('emturbovid') || text.includes('turboviplay') || text.includes('turbovidhls')) return 1;
+  if (text.includes('opción 1') || text.includes('opcion 1') || text.includes('vidhide')) return 2;
+  if (text.includes('lulu') || text.includes('luluvdo')) return 3;
+  if (text.includes('hlswish') || text.includes('streamwish')) return 4;
+  if (text.includes('filemoon')) return 8;
+  if (text.includes('netu') || text.includes('waaw')) return 9;
+  if (text.includes('mobilefast') || text.includes('vudeo')) return 10;
+  if (text.includes('hidefast') || text.includes('ahvsh')) return 11;
+  if (text.includes('vidg') || text.includes('listeamed')) return 12;
+  return 6;
+}
+
+function sortServerTokens(serverTokens) {
+  return [...serverTokens].sort((a, b) => scoreServerToken(a) - scoreServerToken(b));
 }
 
 function cleanText(str) {
@@ -107,25 +133,73 @@ function buildFallbackUrls(type, title, originalTitle) {
   return candidates;
 }
 
-async function mapWithConcurrency(items, concurrency, worker) {
+async function mapWithConcurrency(items, concurrency, worker, options = {}) {
   const results = [];
   let index = 0;
+  let completed = 0;
+  let settled = false;
+  let fastReturnEnabled = false;
+  let minWaitTimer = null;
+  let timeoutTimer = null;
 
-  async function runNext() {
-    while (index < items.length) {
-      const currentIndex = index++;
-      const result = await worker(items[currentIndex], currentIndex);
-      if (result) {
-        results.push(result);
+  const minResults = options.minResults || Infinity;
+  const minWaitMs = options.minWaitMs || 0;
+  const timeoutMs = options.timeoutMs || 0;
+
+  return new Promise((resolve) => {
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (minWaitTimer) clearTimeout(minWaitTimer);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      resolve([...results]);
+    };
+
+    const maybeFinish = () => {
+      if (completed >= items.length) {
+        finish();
+        return;
+      }
+
+      if (fastReturnEnabled && results.length >= minResults) {
+        console.log(`TioPlus: Returning ${results.length} fast token results; slow tokens still pending.`);
+        finish();
+      }
+    };
+
+    if (minWaitMs > 0) {
+      minWaitTimer = setTimeout(() => {
+        fastReturnEnabled = true;
+        maybeFinish();
+      }, minWaitMs);
+    } else {
+      fastReturnEnabled = true;
+    }
+
+    if (timeoutMs > 0) {
+      timeoutTimer = setTimeout(() => {
+        console.warn(`TioPlus: Token collection timed out with ${results.length} streams.`);
+        finish();
+      }, timeoutMs);
+    }
+
+    async function runNext() {
+      while (!settled && index < items.length) {
+        const currentIndex = index++;
+        try {
+          const result = await worker(items[currentIndex], currentIndex);
+          if (result) {
+            results.push(result);
+          }
+        } finally {
+          completed += 1;
+          maybeFinish();
+        }
       }
     }
-  }
 
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, items.length) }, () => runNext())
-  );
-
-  return results;
+    Array.from({ length: Math.min(concurrency, items.length) }, () => runNext());
+  });
 }
 
 /**
@@ -269,9 +343,10 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     });
 
     console.log(`TioPlus: Found ${serverTokens.length} server tokens`);
+    const sortedServerTokens = sortServerTokens(serverTokens);
 
     // 3. For each token, resolve player redirect
-    const streams = await mapWithConcurrency(serverTokens, TOKEN_CONCURRENCY, async (sInfo) => {
+    const streams = await mapWithConcurrency(sortedServerTokens, TOKEN_CONCURRENCY, async (sInfo) => {
       try {
         if (isP2POption(sInfo.name) || isP2POption(sInfo.token)) {
           console.log(`TioPlus: Skipping P2P/torrent server ${sInfo.name}`);
@@ -347,6 +422,10 @@ async function scrape(title, originalTitle, year, type, season, episode) {
         console.error(`TioPlus: Error resolving player token for ${sInfo.name}:`, err.message);
       }
       return null;
+    }, {
+      minResults: TOKEN_FAST_MIN_RESULTS,
+      minWaitMs: TOKEN_FAST_MIN_WAIT_MS,
+      timeoutMs: TOKEN_COLLECTION_TIMEOUT_MS
     });
 
     return streams;

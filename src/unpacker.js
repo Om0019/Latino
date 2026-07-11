@@ -7,7 +7,7 @@ const PLAYER_FETCH_TIMEOUT_MS = 5000;
 const PELISPLUS_FETCH_TIMEOUT_MS = 4500;
 const MAX_RESOLVE_DEPTH = 5;
 const DOOD_DIRECT_TIMEOUT_MS = 1800;
-const FILEMOON_API_TIMEOUT_MS = 2200;
+const FILEMOON_API_TIMEOUT_MS = 3500;
 
 function unpack(p, a, c, k, e, d) {
   const e_func = function(c) {
@@ -682,7 +682,7 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
 
         return null;
     } catch (e) {
-        console.error("resolvePlayerStream error for", url, e.message);
+        console.warn(`Unpacker: Player wrapper skipped (${getHostname(url) || url}): ${e.message}`);
         return null;
     }
 }
