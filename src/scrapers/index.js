@@ -6,11 +6,11 @@ const cinehdplus = require('./cinehdplus');
 const cuevana3i = require('./cuevana3i');
 const { fetchWithTimeout, normalizeUrl } = require('../http');
 
-const SCRAPER_TIMEOUT_MS = 6500;
-const SOLOLATINO_TIMEOUT_MS = 9000;
-const SCRAPER_COLLECTION_TIMEOUT_MS = 7000;
+const SCRAPER_TIMEOUT_MS = 11000;
+const SOLOLATINO_TIMEOUT_MS = 12000;
+const SCRAPER_COLLECTION_TIMEOUT_MS = 12500;
 const STREAM_VALIDATION_TIMEOUT_MS = 5000;
-const STREAM_VALIDATION_TOTAL_TIMEOUT_MS = 6500;
+const STREAM_VALIDATION_TOTAL_TIMEOUT_MS = 5500;
 const STREAM_CACHE_TTL_MS = 90 * 1000;
 const ENABLE_CINEHDPLUS = false;
 
