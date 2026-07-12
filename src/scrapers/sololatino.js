@@ -102,6 +102,42 @@ function buildFallbackUrls(type, title, originalTitle) {
   return candidates;
 }
 
+function extractPageIdentityText(html) {
+  const $ = cheerio.load(html || '');
+  return [
+    $('title').text(),
+    $('meta[property="og:title"]').attr('content'),
+    $('meta[name="description"]').attr('content'),
+    $('h1').first().text(),
+    $('h2').first().text()
+  ].filter(Boolean).join(' ');
+}
+
+function pageHasRequestedYear(html, year) {
+  if (!year) return true;
+  const identityText = extractPageIdentityText(html);
+  const years = extractCandidateYears(identityText);
+  return years.has(year.toString());
+}
+
+async function probeFallbackCandidate(candidate, year, userAgent) {
+  const probeRes = await fetchWithTimeout(candidate.url, {
+    headers: { 'User-Agent': userAgent }
+  }, PROBE_TIMEOUT_MS);
+
+  if (!probeRes.ok) {
+    return null;
+  }
+
+  const html = await probeRes.text();
+  if (year && !pageHasRequestedYear(html, year)) {
+    console.log(`SoloLatino: Rejecting fallback ${candidate.url}; page does not contain requested year ${year}`);
+    return null;
+  }
+
+  return candidate;
+}
+
 function scorePlayerToken(playerInfo) {
   const label = (playerInfo.name || '').toLowerCase();
 
@@ -204,12 +240,10 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     if (!bestMatch) {
       for (const candidate of buildFallbackUrls(type, title, originalTitle)) {
         try {
-          const probeRes = await fetchWithTimeout(candidate.url, {
-            headers: { 'User-Agent': userAgent }
-          }, PROBE_TIMEOUT_MS);
-          if (probeRes.ok) {
-            console.log(`SoloLatino: Using direct URL fallback ${candidate.url}`);
-            bestMatch = candidate;
+          const probedCandidate = await probeFallbackCandidate(candidate, year, userAgent);
+          if (probedCandidate) {
+            console.log(`SoloLatino: Using direct URL fallback ${probedCandidate.url}`);
+            bestMatch = probedCandidate;
             break;
           }
         } catch (err) {
@@ -450,4 +484,12 @@ async function scrape(title, originalTitle, year, type, season, episode) {
   }
 }
 
-module.exports = { scrape };
+module.exports = {
+  scrape,
+  __test: {
+    scoreCandidate,
+    extractPageIdentityText,
+    pageHasRequestedYear,
+    buildFallbackUrls
+  }
+};
