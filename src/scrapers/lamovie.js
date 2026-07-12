@@ -47,7 +47,7 @@ function scoreCandidate(result, title, originalTitle, year, type) {
   return score;
 }
 
-async function search(title, originalTitle, year, type, userAgent) {
+async function search(title, originalTitle, year, type, userAgent, signal) {
   const queries = [...new Set([title, originalTitle].filter(Boolean))];
 
   for (const query of queries) {
@@ -58,7 +58,8 @@ async function search(title, originalTitle, year, type, userAgent) {
 
     try {
       const res = await fetchWithTimeout(url.toString(), {
-        headers: { 'User-Agent': userAgent, 'Accept': 'application/json' }
+        headers: { 'User-Agent': userAgent, 'Accept': 'application/json' },
+        signal
       }, SEARCH_TIMEOUT_MS);
       if (!res.ok) continue;
 
@@ -84,7 +85,7 @@ async function search(title, originalTitle, year, type, userAgent) {
   return null;
 }
 
-async function getEpisodePostId(seriesId, season, episode, userAgent) {
+async function getEpisodePostId(seriesId, season, episode, userAgent, signal) {
   if (!seriesId || !season || !episode) return null;
 
   const url = new URL(`${API_URL}/single/episodes/list`);
@@ -95,7 +96,8 @@ async function getEpisodePostId(seriesId, season, episode, userAgent) {
 
   try {
     const res = await fetchWithTimeout(url.toString(), {
-      headers: { 'User-Agent': userAgent, 'Accept': 'application/json' }
+      headers: { 'User-Agent': userAgent, 'Accept': 'application/json' },
+      signal
     }, EPISODES_TIMEOUT_MS);
     if (!res.ok) return null;
 
@@ -128,11 +130,12 @@ async function mapWithConcurrency(items, concurrency, worker) {
   return results;
 }
 
-async function scrape(title, originalTitle, year, type, season, episode) {
+async function scrape(title, originalTitle, year, type, season, episode, options = {}) {
+  const { signal } = options;
   const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   try {
-    const match = await search(title, originalTitle, year, type, userAgent);
+    const match = await search(title, originalTitle, year, type, userAgent, signal);
     if (!match) {
       console.log(`LaMovie: No matching content found for "${title}"`);
       return [];
@@ -140,7 +143,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
 
     let postId = match._id;
     if (type === 'series') {
-      postId = await getEpisodePostId(match._id, season, episode, userAgent);
+      postId = await getEpisodePostId(match._id, season, episode, userAgent, signal);
       if (!postId) {
         console.log(`LaMovie: No episode found for "${title}" S${season}E${episode}`);
         return [];
@@ -152,7 +155,8 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     playerUrl.searchParams.set('demo', '0');
 
     const playerRes = await fetchWithTimeout(playerUrl.toString(), {
-      headers: { 'User-Agent': userAgent, 'Accept': 'application/json', 'Referer': BASE_URL }
+      headers: { 'User-Agent': userAgent, 'Accept': 'application/json', 'Referer': BASE_URL },
+      signal
     }, PLAYER_TIMEOUT_MS);
     if (!playerRes.ok) return [];
 
@@ -164,7 +168,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
       const embedUrl = embed.url;
       if (!embedUrl || /^magnet:/i.test(embedUrl)) return null;
 
-      const resolvedUrl = await unpacker.resolvePlayerStream(embedUrl, userAgent, BASE_URL);
+      const resolvedUrl = await unpacker.resolvePlayerStream(embedUrl, userAgent, BASE_URL, { signal });
       if (!resolvedUrl) return null;
 
       return {

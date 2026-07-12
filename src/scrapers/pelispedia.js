@@ -72,7 +72,7 @@ function buildFallbackUrls(type, title, originalTitle, year) {
   return candidates;
 }
 
-async function search(title, originalTitle, year, type, userAgent) {
+async function search(title, originalTitle, year, type, userAgent, signal) {
   const queries = [...new Set([title, originalTitle].filter(Boolean))];
   const pathNeedle = type === 'series' ? '/serie/' : '/pelicula/';
 
@@ -80,7 +80,8 @@ async function search(title, originalTitle, year, type, userAgent) {
     try {
       const searchUrl = `${BASE_URL}/search?s=${encodeURIComponent(query)}`;
       const res = await fetchWithTimeout(searchUrl, {
-        headers: { 'User-Agent': userAgent }
+        headers: { 'User-Agent': userAgent },
+        signal
       }, SEARCH_TIMEOUT_MS);
       if (!res.ok) continue;
 
@@ -116,7 +117,8 @@ async function search(title, originalTitle, year, type, userAgent) {
   for (const candidateUrl of buildFallbackUrls(type, title, originalTitle, year)) {
     try {
       const res = await fetchWithTimeout(candidateUrl, {
-        headers: { 'User-Agent': userAgent }
+        headers: { 'User-Agent': userAgent },
+        signal
       }, SEARCH_TIMEOUT_MS);
       if (res.ok) return candidateUrl;
     } catch {
@@ -180,11 +182,12 @@ async function mapWithConcurrency(items, concurrency, worker) {
   return results;
 }
 
-async function scrape(title, originalTitle, year, type, season, episode) {
+async function scrape(title, originalTitle, year, type, season, episode, options = {}) {
+  const { signal } = options;
   const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   try {
-    const pageUrl = await search(title, originalTitle, year, type, userAgent);
+    const pageUrl = await search(title, originalTitle, year, type, userAgent, signal);
     if (!pageUrl) {
       console.log(`PelisPedia: No matching content found for "${title}"`);
       return [];
@@ -192,7 +195,8 @@ async function scrape(title, originalTitle, year, type, season, episode) {
 
     let targetUrl = pageUrl;
     let pageRes = await fetchWithTimeout(targetUrl, {
-      headers: { 'User-Agent': userAgent }
+      headers: { 'User-Agent': userAgent },
+      signal
     }, PAGE_TIMEOUT_MS);
     if (!pageRes.ok) return [];
 
@@ -205,7 +209,8 @@ async function scrape(title, originalTitle, year, type, season, episode) {
       }
       targetUrl = episodeUrl;
       pageRes = await fetchWithTimeout(targetUrl, {
-        headers: { 'User-Agent': userAgent }
+        headers: { 'User-Agent': userAgent },
+        signal
       }, PAGE_TIMEOUT_MS);
       if (!pageRes.ok) return [];
       pageHtml = await pageRes.text();
@@ -215,7 +220,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     console.log(`PelisPedia: Found ${iframeUrls.length} iframe players`);
 
     return await mapWithConcurrency(iframeUrls, PLAYER_CONCURRENCY, async (iframeUrl, index) => {
-      const resolvedUrl = await unpacker.resolvePlayerStream(iframeUrl, userAgent, targetUrl);
+      const resolvedUrl = await unpacker.resolvePlayerStream(iframeUrl, userAgent, targetUrl, { signal });
       if (!resolvedUrl) return null;
 
       return {

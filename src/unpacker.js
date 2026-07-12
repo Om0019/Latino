@@ -356,7 +356,7 @@ const { key: PELISPLUS_KEY, iv: PELISPLUS_IV } = _buildPelisplusKeyAndIV();
 /**
  * Resolves a pelisplus embed URL (upns.pro, 4meplayer.pro, strp2p.com) to a direct m3u8.
  */
-async function resolvePelisplus(embedUrl, userAgent, referer) {
+async function resolvePelisplus(embedUrl, userAgent, referer, signal) {
   try {
     const urlObj = new URL(embedUrl);
     const hash = urlObj.hash.replace('#', '');
@@ -365,7 +365,8 @@ async function resolvePelisplus(embedUrl, userAgent, referer) {
     
     const apiUrl = `https://${host}/api/v1/video?id=${hash}`;
     const res = await fetchWithTimeout(apiUrl, {
-      headers: { 'User-Agent': userAgent, 'Referer': referer || embedUrl, 'Origin': `https://${host}` }
+      headers: { 'User-Agent': userAgent, 'Referer': referer || embedUrl, 'Origin': `https://${host}` },
+      signal
     }, PELISPLUS_FETCH_TIMEOUT_MS);
     if (!res.ok) return null;
     
@@ -479,7 +480,7 @@ function decryptEmbed69(html) {
   return decryptedLinks;
 }
 
-async function resolveDood(html, url, userAgent) {
+async function resolveDood(html, url, userAgent, signal) {
   if (!isDoodHost(url)) return null;
 
   const passMatch = html.match(/(["'])(\/pass_md5\/[^"'<>]+)\1/i)
@@ -493,7 +494,8 @@ async function resolveDood(html, url, userAgent) {
         'User-Agent': userAgent,
         'Referer': url,
         'X-Requested-With': 'XMLHttpRequest'
-      }
+      },
+      signal
     }, DOOD_DIRECT_TIMEOUT_MS);
     if (!res.ok) return null;
 
@@ -560,7 +562,7 @@ function extractFilemoonCode(url) {
   }
 }
 
-async function resolveFilemoon(url, userAgent, referer) {
+async function resolveFilemoon(url, userAgent, referer, signal) {
   if (!isFilemoonHost(url)) return null;
 
   const code = extractFilemoonCode(url);
@@ -583,7 +585,8 @@ async function resolveFilemoon(url, userAgent, referer) {
           'X-Embed-Origin': referer ? getHostname(referer) : '',
           'X-Embed-Referer': referer || url,
           'X-Embed-Parent': referer || url
-        }
+        },
+        signal
       }, FILEMOON_API_TIMEOUT_MS);
       if (!res.ok) continue;
 
@@ -626,6 +629,7 @@ function addVoePermanentToken(url) {
 async function resolvePlayerStream(url, userAgent, referer, options = {}) {
     const depth = options.depth || 0;
     const visited = options.visited || new Set();
+    const signal = options.signal;
     const normalizedInputUrl = normalizeUrl(url, referer);
     if (!normalizedInputUrl || depth > MAX_RESOLVE_DEPTH || visited.has(normalizedInputUrl)) {
         return null;
@@ -640,24 +644,25 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
     try {
         // Pelisplus SPA players (upns, 4meplayer, strp2p)
         if (url.includes('pelisplus.upns.pro') || url.includes('4meplayer.pro') || url.includes('strp2p.com')) {
-            const m3u8 = await resolvePelisplus(url, userAgent, referer);
+            const m3u8 = await resolvePelisplus(url, userAgent, referer, signal);
             if (m3u8) return m3u8;
         }
 
         if (isFilemoonHost(url)) {
-            const directUrl = await resolveFilemoon(url, userAgent, referer);
+            const directUrl = await resolveFilemoon(url, userAgent, referer, signal);
             if (directUrl) return directUrl;
         }
 
         const { res, text: html } = await fetchTextWithTimeout(url, {
-            headers: { 'User-Agent': userAgent, 'Referer': referer }
+            headers: { 'User-Agent': userAgent, 'Referer': referer },
+            signal
         }, PLAYER_FETCH_TIMEOUT_MS);
         if (!res.ok) return null;
 
         if (isVoeHost(url) && html.includes('generate-token') && !url.includes('permanentToken=')) {
             const tokenUrl = addVoePermanentToken(url);
             if (tokenUrl && tokenUrl !== url) {
-                return await resolvePlayerStream(tokenUrl, userAgent, referer, { depth: depth + 1, visited });
+                return await resolvePlayerStream(tokenUrl, userAgent, referer, { depth: depth + 1, visited, signal });
             }
         }
 
@@ -673,7 +678,7 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
             const iframeMatch = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
             const iframeUrl = normalizeUrl(iframeMatch?.[1], url);
             if (iframeUrl && iframeUrl !== url && isWaawHost(iframeUrl)) {
-                return await resolvePlayerStream(iframeUrl, userAgent, url, { depth: depth + 1, visited });
+                return await resolvePlayerStream(iframeUrl, userAgent, url, { depth: depth + 1, visited, signal });
             }
 
             return null;
@@ -692,7 +697,7 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
             if (urlPlay) return normalizeUrl(urlPlay[1], url);
         }
 
-        const doodDirectUrl = await resolveDood(html, url, userAgent);
+        const doodDirectUrl = await resolveDood(html, url, userAgent, signal);
         if (doodDirectUrl) return doodDirectUrl;
 
         // Check if it's embed69, including mirrored /vidurl pages that serve Embed69 HTML.
@@ -716,7 +721,7 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
 
                 for (const embed of rankedEmbeds) {
                     if (isSupportedEmbedServer(embed.server)) {
-                        const directUrl = await resolvePlayerStream(embed.url, userAgent, url, { depth: depth + 1, visited });
+                        const directUrl = await resolvePlayerStream(embed.url, userAgent, url, { depth: depth + 1, visited, signal });
                         if (directUrl) return directUrl;
                     }
                 }
@@ -728,13 +733,13 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
         const redirectUrl = normalizeUrl(jsRedirectMatch?.[1] || jsRedirectMatch?.[2], url);
         if (redirectUrl && redirectUrl !== url && isHttpUrl(redirectUrl)) {
             console.log(`Unpacker: Following JS redirect to ${redirectUrl}`);
-            return await resolvePlayerStream(redirectUrl, userAgent, referer, { depth: depth + 1, visited });
+            return await resolvePlayerStream(redirectUrl, userAgent, referer, { depth: depth + 1, visited, signal });
         }
 
         const iframeMatch = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
         const iframeUrl = normalizeUrl(iframeMatch?.[1], url);
         if (iframeUrl && iframeUrl !== url && isHttpUrl(iframeUrl)) {
-            const directUrl = await resolvePlayerStream(iframeUrl, userAgent, url, { depth: depth + 1, visited });
+            const directUrl = await resolvePlayerStream(iframeUrl, userAgent, url, { depth: depth + 1, visited, signal });
             if (directUrl) return directUrl;
         }
 

@@ -23,20 +23,43 @@ function normalizeUrl(value, baseUrl) {
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  const externalSignal = options.signal;
+  const abortFromExternalSignal = () => controller.abort();
+
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort();
+    } else {
+      externalSignal.addEventListener('abort', abortFromExternalSignal, { once: true });
+    }
+  }
+
+  const { signal, ...fetchOptions } = options;
 
   try {
     return await fetch(url, {
-      ...options,
-      signal: options.signal || controller.signal
+      ...fetchOptions,
+      signal: controller.signal
     });
   } catch (error) {
     if (error.name === 'AbortError') {
+      if (!timedOut) {
+        throw new Error(`Fetch aborted: ${url}`);
+      }
       throw new Error(`Fetch timeout after ${timeoutMs}ms: ${url}`);
     }
     throw error;
   } finally {
     clearTimeout(timeoutId);
+    if (externalSignal) {
+      externalSignal.removeEventListener('abort', abortFromExternalSignal);
+    }
   }
 }
 

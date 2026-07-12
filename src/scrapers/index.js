@@ -11,6 +11,7 @@ const { fetchWithTimeout, normalizeUrl } = require('../http');
 const SCRAPER_TIMEOUT_MS = 10000;
 const SOLOLATINO_TIMEOUT_MS = 12000;
 const SCRAPER_COLLECTION_TIMEOUT_MS = 11500;
+const EMPTY_RESULT_GRACE_MS = 3500;
 const FAST_SOURCE_MIN_WAIT_MS = 3500;
 const FAST_SOURCE_MIN_STREAMS = 3;
 const FAST_SOURCE_MIN_SOURCES = 1;
@@ -20,9 +21,11 @@ const STREAM_VALIDATION_FAST_TIMEOUT_MS = 3200;
 const MIN_CONFIRMED_STREAMS = 3;
 const MAX_VALIDATION_CANDIDATES = 8;
 const STREAM_CACHE_TTL_MS = 10 * 60 * 1000;
+const EMPTY_STREAM_CACHE_TTL_MS = 15 * 1000;
 const ENABLE_CINEHDPLUS = false;
 const HOST_HEALTH_TTL_MS = 5 * 60 * 1000;
-const HOST_HEALTH_MAX_PENALTY = 5;
+const HOST_DEAD_TTL_MS = 3 * 60 * 1000;
+const HOST_HEALTH_MAX_EVENTS = 12;
 
 const streamCache = new Map();
 const inFlightRequests = new Map();
@@ -52,40 +55,114 @@ function isKnownBadStream(stream) {
 
 function getHostHealth(host) {
   const health = hostHealth.get(host);
-  if (!health) return { penalty: 0 };
+  if (!health) return createEmptyHostHealth();
 
   if (health.expiresAt <= Date.now()) {
     hostHealth.delete(host);
-    return { penalty: 0 };
+    return createEmptyHostHealth();
   }
 
   return health;
 }
 
-function recordHostHealth(stream, playable) {
+function createEmptyHostHealth() {
+  return {
+    events: [],
+    avgLatencyMs: null,
+    expiresAt: 0,
+    deadUntil: 0
+  };
+}
+
+function isHardDeadStatus(status) {
+  return [404, 410, 451].includes(status);
+}
+
+function isGatewayFailureStatus(status) {
+  return [502, 503, 504].includes(status);
+}
+
+function recordHostHealth(stream, outcome, details = {}) {
   const host = getStreamHost(stream);
   if (!host) return;
 
   const current = getHostHealth(host);
-  const penalty = playable
-    ? Math.max(0, (current.penalty || 0) - 1)
-    : Math.min(HOST_HEALTH_MAX_PENALTY, (current.penalty || 0) + 1);
+  const event = {
+    outcome,
+    status: details.status || 0,
+    latencyMs: details.latencyMs || null,
+    at: Date.now()
+  };
+  const events = [...(current.events || []), event].slice(-HOST_HEALTH_MAX_EVENTS);
+  const successfulLatencies = events
+    .filter((item) => item.outcome === 'success' && Number.isFinite(item.latencyMs))
+    .map((item) => item.latencyMs);
+  const avgLatencyMs = successfulLatencies.length > 0
+    ? Math.round(successfulLatencies.reduce((total, value) => total + value, 0) / successfulLatencies.length)
+    : current.avgLatencyMs;
+  const recentFailures = events.filter((item) => item.outcome !== 'success');
+  const recentHardFailures = recentFailures.filter((item) => (
+    item.outcome === 'hard-fail'
+    || isHardDeadStatus(item.status)
+  ));
+  const recentTimeouts = recentFailures.filter((item) => item.outcome === 'timeout');
+  const recentGatewayFailures = recentFailures.filter((item) => (
+    item.outcome === 'gateway-fail'
+    || isGatewayFailureStatus(item.status)
+  ));
 
-  if (penalty === 0) {
+  let deadUntil = current.deadUntil || 0;
+  if (
+    recentHardFailures.length >= 2
+    || recentTimeouts.length >= 3
+    || recentGatewayFailures.length >= 3
+  ) {
+    deadUntil = Date.now() + HOST_DEAD_TTL_MS;
+  }
+
+  const health = {
+    events,
+    avgLatencyMs,
+    expiresAt: Date.now() + HOST_HEALTH_TTL_MS,
+    deadUntil
+  };
+
+  if (getHostPenalty(health) === 0 && !avgLatencyMs) {
     hostHealth.delete(host);
     return;
   }
 
-  hostHealth.set(host, {
-    penalty,
-    expiresAt: Date.now() + HOST_HEALTH_TTL_MS
-  });
+  hostHealth.set(host, health);
+}
+
+function getHostPenalty(health) {
+  const events = health.events || [];
+  if (events.length === 0) return 0;
+
+  const softFailures = events.filter((event) => event.outcome === 'soft-fail').length;
+  const successes = events.filter((event) => event.outcome === 'success').length;
+  const timeouts = events.filter((event) => event.outcome === 'timeout').length;
+  const hardFailures = events.filter((event) => event.outcome === 'hard-fail' || isHardDeadStatus(event.status)).length;
+  const gatewayFailures = events.filter((event) => event.outcome === 'gateway-fail' || isGatewayFailureStatus(event.status)).length;
+  const latencyPenalty = health.avgLatencyMs
+    ? Math.min(3, Math.floor(Math.max(0, health.avgLatencyMs - 1500) / 1000))
+    : 0;
+  const deadPenalty = health.deadUntil > Date.now() ? 20 : 0;
+
+  return Math.max(0, softFailures + (timeouts * 2) + (hardFailures * 3) + (gatewayFailures * 2) + latencyPenalty + deadPenalty - successes);
+}
+
+function shouldSkipHost(stream) {
+  const host = getStreamHost(stream);
+  if (!host) return false;
+  const health = getHostHealth(host);
+  return health.deadUntil > Date.now();
 }
 
 function scoreStream(stream) {
   const host = getStreamHost(stream);
   const title = (stream.title || '').toLowerCase();
-  const healthPenalty = getHostHealth(host).penalty || 0;
+  const healthPenalty = getHostPenalty(getHostHealth(host));
   let baseScore = 9;
 
   if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) baseScore = 0;
@@ -162,12 +239,13 @@ function uniqueStreams(streams) {
   return unique;
 }
 
-function withTimeout(promise, timeoutMs, label) {
+function withTimeout(promise, timeoutMs, label, onTimeout) {
   let timeoutId;
 
   const timeoutPromise = new Promise((resolve) => {
     timeoutId = setTimeout(() => {
         console.warn(`${label} timed out after ${timeoutMs}ms`);
+        if (onTimeout) onTimeout();
         resolve([]);
       }, timeoutMs);
   });
@@ -218,8 +296,9 @@ async function collectScraperResults(tasks, timeoutMs) {
       })
   ));
 
+  const allCompletePromise = Promise.all(trackedTasks).then(() => 'complete');
   const completionReason = await Promise.race([
-    Promise.all(trackedTasks).then(() => 'complete'),
+    allCompletePromise,
     new Promise((resolve) => setTimeout(() => resolve('timeout'), timeoutMs)),
     fastReturnPromise
   ]);
@@ -233,7 +312,56 @@ async function collectScraperResults(tasks, timeoutMs) {
     console.warn(`Scraper orchestrator: Returning partial results (${reason}); still waiting on ${pendingNames}`);
   }
 
-  return results;
+  return {
+    completionReason,
+    results,
+    allCompletePromise
+  };
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function createScraperTask(scraper, label, args, timeoutMs) {
+  const controller = new AbortController();
+  const promise = scraper.scrape(...args, { signal: controller.signal });
+  return {
+    name: label,
+    promise: withTimeout(promise, timeoutMs, label, () => controller.abort()),
+    abort: () => controller.abort()
+  };
+}
+
+function abortPendingScrapers(tasks, results) {
+  const completedNames = new Set(results.map((result) => result.name));
+  tasks
+    .filter((task) => !completedNames.has(task.name))
+    .forEach((task) => task.abort());
+}
+
+function buildScraperArgs(scraperName, title, originalTitle, year, type, season, episode) {
+  const originalFirstSources = type === 'series'
+    ? new Set(['Cuevana3i', 'TioPlus', 'LaMovie', 'PelisPedia'])
+    : new Set();
+
+  if (
+    originalFirstSources.has(scraperName)
+    && originalTitle
+    && cleanComparableTitle(originalTitle) !== cleanComparableTitle(title)
+  ) {
+    return [originalTitle, title, year, type, season, episode];
+  }
+
+  return [title, originalTitle, year, type, season, episode];
+}
+
+function cleanComparableTitle(value) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/g, '');
 }
 
 function sanitizeStream(stream) {
@@ -266,7 +394,8 @@ function isHtmlResponse(response) {
   return (response.headers.get('content-type') || '').toLowerCase().includes('text/html');
 }
 
-async function isPlayableStream(stream) {
+async function isPlayableStream(stream, signal) {
+  const startedAt = Date.now();
   const headers = {
     'User-Agent': stream?.behaviorHints?.proxyHeaders?.request?.['User-Agent']
       || 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -278,59 +407,92 @@ async function isPlayableStream(stream) {
     const response = await fetchWithTimeout(stream.url, {
       method: 'GET',
       headers,
-      redirect: 'follow'
+      redirect: 'follow',
+      signal
     }, STREAM_VALIDATION_TIMEOUT_MS);
 
     if ([401, 403, 404, 410, 451].includes(response.status)) {
       console.log(`Scraper orchestrator: Filtering unplayable stream (${response.status}): ${stream.url}`);
-      recordHostHealth(stream, false);
+      recordHostHealth(stream, isHardDeadStatus(response.status) ? 'hard-fail' : 'soft-fail', {
+        status: response.status,
+        latencyMs: Date.now() - startedAt
+      });
       return false;
     }
 
     if (!response.ok && response.status !== 206) {
       console.log(`Scraper orchestrator: Filtering stream with bad validation status (${response.status}): ${stream.url}`);
-      recordHostHealth(stream, false);
+      recordHostHealth(stream, isGatewayFailureStatus(response.status) ? 'gateway-fail' : 'soft-fail', {
+        status: response.status,
+        latencyMs: Date.now() - startedAt
+      });
       return false;
     }
 
     if (stream.url.toLowerCase().includes('.m3u8')) {
       if (isHtmlResponse(response)) {
-        recordHostHealth(stream, false);
+        recordHostHealth(stream, 'soft-fail', {
+          status: response.status,
+          latencyMs: Date.now() - startedAt
+        });
         return false;
       }
       const body = await response.text();
       const playable = body.includes('#EXTM3U') || body.includes('#EXT-X-STREAM-INF') || body.includes('#EXTINF');
-      recordHostHealth(stream, playable);
+      recordHostHealth(stream, playable ? 'success' : 'soft-fail', {
+        status: response.status,
+        latencyMs: Date.now() - startedAt
+      });
       return playable;
     }
 
     if (isHtmlResponse(response) && !looksLikePlayableUrl(response.url || stream.url)) {
-      recordHostHealth(stream, false);
+      recordHostHealth(stream, 'soft-fail', {
+        status: response.status,
+        latencyMs: Date.now() - startedAt
+      });
       return false;
     }
 
     const playable = looksLikePlayableUrl(response.url || stream.url)
       || (response.headers.get('content-type') || '').toLowerCase().startsWith('video/')
       || (response.headers.get('content-disposition') || '').toLowerCase().includes('attachment');
-    recordHostHealth(stream, playable);
+    recordHostHealth(stream, playable ? 'success' : 'soft-fail', {
+      status: response.status,
+      latencyMs: Date.now() - startedAt
+    });
     return playable;
   } catch (error) {
+    if (error.message.startsWith('Fetch aborted:')) {
+      return false;
+    }
     console.log(`Scraper orchestrator: Filtering stream that failed validation: ${stream.url} (${error.message})`);
-    recordHostHealth(stream, false);
+    recordHostHealth(stream, error.message.includes('timeout') ? 'timeout' : 'soft-fail', {
+      latencyMs: Date.now() - startedAt
+    });
     return false;
   }
 }
 
 async function validatePlayableStreams(streams) {
   const sortedStreams = sortStreams(streams);
-  const streamsToValidate = sortedStreams.slice(0, MAX_VALIDATION_CANDIDATES);
-  const remainingStreams = sortedStreams.slice(MAX_VALIDATION_CANDIDATES);
+  const eligibleStreams = sortedStreams.filter((stream) => !shouldSkipHost(stream));
+  const skippedStreams = sortedStreams.filter(shouldSkipHost);
+  const streamsToValidate = eligibleStreams.slice(0, MAX_VALIDATION_CANDIDATES);
+  const remainingStreams = [
+    ...eligibleStreams.slice(MAX_VALIDATION_CANDIDATES),
+    ...skippedStreams
+  ];
 
   if (streamsToValidate.length === 0) {
-    return [];
+    if (sortedStreams.length > 0) {
+      console.warn('Scraper orchestrator: All candidate hosts are temporarily unhealthy; returning URL-sanitized streams as fallback.');
+    }
+    return sortedStreams;
   }
 
   const playableStreams = [];
+  const validationController = new AbortController();
   let completed = 0;
   let resolveEnoughConfirmed;
   let resolveAllComplete;
@@ -343,7 +505,7 @@ async function validatePlayableStreams(streams) {
   });
 
   streamsToValidate.forEach((stream) => {
-    isPlayableStream(stream)
+    isPlayableStream(stream, validationController.signal)
       .then((playable) => {
         if (playable) {
           playableStreams.push(stream);
@@ -354,7 +516,9 @@ async function validatePlayableStreams(streams) {
       })
       .catch((error) => {
         console.log(`Scraper orchestrator: Validation task failed for ${stream.url}: ${error.message}`);
-        recordHostHealth(stream, false);
+        if (!error.message.startsWith('Fetch aborted:')) {
+          recordHostHealth(stream, 'soft-fail');
+        }
       })
       .finally(() => {
         completed += 1;
@@ -373,6 +537,10 @@ async function validatePlayableStreams(streams) {
     new Promise((resolve) => setTimeout(() => resolve('timeout'), timeoutMs))
   ]);
 
+  if (completionReason !== 'complete') {
+    validationController.abort();
+  }
+
   if (playableStreams.length > 0) {
     if (completionReason === 'timeout') {
       console.warn(`Scraper orchestrator: Validation timed out; returning ${playableStreams.length} confirmed playable streams and dropping slow candidates.`);
@@ -381,8 +549,8 @@ async function validatePlayableStreams(streams) {
   }
 
   if (remainingStreams.length > 0) {
-    console.warn('Scraper orchestrator: No validated streams yet; returning lower-priority sanitized fallback streams to avoid a false empty result.');
-    return remainingStreams;
+    console.warn('Scraper orchestrator: No validated streams yet; returning URL-sanitized streams to avoid a false empty result.');
+    return sortedStreams;
   }
 
   if (sortedStreams.length > 0) {
@@ -447,25 +615,39 @@ async function getStreamsUncached(type, id, season, episode) {
 
     // 2. Invoke scrapers in parallel
     const scraperTasks = [
-      { name: 'SoloLatino', promise: withTimeout(sololatino.scrape(title, originalTitle, year, type, season, episode), SOLOLATINO_TIMEOUT_MS, 'SoloLatino') },
-      { name: 'Cinecalidad', promise: withTimeout(cinecalidad.scrape(title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, 'Cinecalidad') },
-      { name: 'TioPlus', promise: withTimeout(tioplus.scrape(title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, 'TioPlus') },
-      { name: 'Cuevana3i', promise: withTimeout(cuevana3i.scrape(title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, 'Cuevana3i') },
-      { name: 'LaMovie', promise: withTimeout(lamovie.scrape(title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, 'LaMovie') },
-      { name: 'PelisPedia', promise: withTimeout(pelispedia.scrape(title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, 'PelisPedia') }
+      createScraperTask(sololatino, 'SoloLatino', buildScraperArgs('SoloLatino', title, originalTitle, year, type, season, episode), SOLOLATINO_TIMEOUT_MS),
+      createScraperTask(cinecalidad, 'Cinecalidad', buildScraperArgs('Cinecalidad', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS),
+      createScraperTask(tioplus, 'TioPlus', buildScraperArgs('TioPlus', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS),
+      createScraperTask(cuevana3i, 'Cuevana3i', buildScraperArgs('Cuevana3i', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS),
+      createScraperTask(lamovie, 'LaMovie', buildScraperArgs('LaMovie', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS),
+      createScraperTask(pelispedia, 'PelisPedia', buildScraperArgs('PelisPedia', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS)
     ];
 
     if (ENABLE_CINEHDPLUS) {
-      scraperTasks.push({
-        name: 'CineHDPlus',
-        promise: withTimeout(cinehdplus.scrape(title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, 'CineHDPlus')
-      });
+      scraperTasks.push(createScraperTask(cinehdplus, 'CineHDPlus', buildScraperArgs('CineHDPlus', title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS));
     }
 
-    const results = await collectScraperResults(scraperTasks, SCRAPER_COLLECTION_TIMEOUT_MS);
+    const collection = await collectScraperResults(scraperTasks, SCRAPER_COLLECTION_TIMEOUT_MS);
+
+    const countStreams = (results) => results.reduce((total, res) => (
+      total + (res.status === 'fulfilled' && Array.isArray(res.value) ? res.value.length : 0)
+    ), 0);
+
+    if (collection.completionReason !== 'complete' && countStreams(collection.results) === 0) {
+      console.warn(`Scraper orchestrator: Partial collection had no streams; waiting up to ${EMPTY_RESULT_GRACE_MS}ms to avoid a false empty result.`);
+      await Promise.race([
+        collection.allCompletePromise,
+        delay(EMPTY_RESULT_GRACE_MS)
+      ]);
+    }
+
+    if (collection.completionReason !== 'complete') {
+      abortPendingScrapers(scraperTasks, collection.results);
+    }
+
     const streams = [];
 
-    results.forEach((res) => {
+    collection.results.forEach((res) => {
       const name = res.name;
 
       if (res.status === 'fulfilled') {
@@ -509,7 +691,7 @@ async function getStreams(type, id, season, episode) {
     .then((streams) => {
       streamCache.set(key, {
         streams,
-        expiresAt: Date.now() + STREAM_CACHE_TTL_MS
+        expiresAt: Date.now() + (streams.length > 0 ? STREAM_CACHE_TTL_MS : EMPTY_STREAM_CACHE_TTL_MS)
       });
       return streams;
     })

@@ -145,6 +145,7 @@ async function mapWithConcurrency(items, concurrency, worker, options = {}) {
   const minResults = options.minResults || Infinity;
   const minWaitMs = options.minWaitMs || 0;
   const timeoutMs = options.timeoutMs || 0;
+  const signal = options.signal;
 
   return new Promise((resolve) => {
     const finish = () => {
@@ -152,8 +153,17 @@ async function mapWithConcurrency(items, concurrency, worker, options = {}) {
       settled = true;
       if (minWaitTimer) clearTimeout(minWaitTimer);
       if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (signal) signal.removeEventListener('abort', finish);
       resolve([...results]);
     };
+
+    if (signal) {
+      if (signal.aborted) {
+        finish();
+        return;
+      }
+      signal.addEventListener('abort', finish, { once: true });
+    }
 
     const maybeFinish = () => {
       if (completed >= items.length) {
@@ -223,7 +233,8 @@ function utf8_to_b64(str) {
 /**
  * TioPlus Scraper
  */
-async function scrape(title, originalTitle, year, type, season, episode) {
+async function scrape(title, originalTitle, year, type, season, episode, options = {}) {
+  const { signal } = options;
   const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   async function performSearch(searchQuery) {
@@ -232,7 +243,8 @@ async function scrape(title, originalTitle, year, type, season, episode) {
       headers: {
         'User-Agent': userAgent,
         'x-requested-with': 'XMLHttpRequest'
-      }
+      },
+      signal
     }, SEARCH_TIMEOUT_MS);
     console.log(`TioPlus search HTTP status for ${searchQuery}:`, res.status);
     if (!res.ok) return [];
@@ -281,7 +293,8 @@ async function scrape(title, originalTitle, year, type, season, episode) {
       for (const candidate of buildFallbackUrls(type, title, originalTitle)) {
         try {
           const probeRes = await fetchWithTimeout(candidate.url, {
-            headers: { 'User-Agent': userAgent }
+            headers: { 'User-Agent': userAgent },
+            signal
           }, PROBE_TIMEOUT_MS);
           if (probeRes.ok) {
             console.log(`TioPlus: Using direct URL fallback ${candidate.url}`);
@@ -311,7 +324,8 @@ async function scrape(title, originalTitle, year, type, season, episode) {
 
     // 2. Fetch target page to extract player server tokens
     const pageRes = await fetchWithTimeout(targetPageUrl, {
-      headers: { 'User-Agent': userAgent }
+      headers: { 'User-Agent': userAgent },
+      signal
     }, PAGE_TIMEOUT_MS);
     if (!pageRes.ok) {
       console.warn(`TioPlus: Failed to fetch target page: ${targetPageUrl} (${pageRes.status})`);
@@ -344,6 +358,15 @@ async function scrape(title, originalTitle, year, type, season, episode) {
 
     console.log(`TioPlus: Found ${serverTokens.length} server tokens`);
     const sortedServerTokens = sortServerTokens(serverTokens);
+    const tokenController = new AbortController();
+    const abortTokenResolvers = () => tokenController.abort();
+    if (signal) {
+      if (signal.aborted) {
+        tokenController.abort();
+      } else {
+        signal.addEventListener('abort', abortTokenResolvers, { once: true });
+      }
+    }
 
     // 3. For each token, resolve player redirect
     const streams = await mapWithConcurrency(sortedServerTokens, TOKEN_CONCURRENCY, async (sInfo) => {
@@ -380,7 +403,8 @@ async function scrape(title, originalTitle, year, type, season, episode) {
             headers: {
               'User-Agent': userAgent,
               'Referer': 'https://tioplus.app/'
-            }
+            },
+            signal: tokenController.signal
           }, PAGE_TIMEOUT_MS);
           if (!playerRes.ok) return null;
 
@@ -397,7 +421,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
           
         let resolvedDirectUrl = null;
         try {
-          resolvedDirectUrl = await unpacker.resolvePlayerStream(directStreamUrl, userAgent, 'https://tioplus.app/');
+          resolvedDirectUrl = await unpacker.resolvePlayerStream(directStreamUrl, userAgent, 'https://tioplus.app/', { signal: tokenController.signal });
         } catch (e) {
           console.error(`TioPlus: Error resolving hosting redirect for ${sInfo.name}:`, e.message);
         }
@@ -425,8 +449,13 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     }, {
       minResults: TOKEN_FAST_MIN_RESULTS,
       minWaitMs: TOKEN_FAST_MIN_WAIT_MS,
-      timeoutMs: TOKEN_COLLECTION_TIMEOUT_MS
+      timeoutMs: TOKEN_COLLECTION_TIMEOUT_MS,
+      signal: tokenController.signal
     });
+    tokenController.abort();
+    if (signal) {
+      signal.removeEventListener('abort', abortTokenResolvers);
+    }
 
     return streams;
   } catch (error) {

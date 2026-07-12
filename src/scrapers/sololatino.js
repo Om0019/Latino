@@ -120,9 +120,10 @@ function pageHasRequestedYear(html, year) {
   return years.has(year.toString());
 }
 
-async function probeFallbackCandidate(candidate, year, userAgent) {
+async function probeFallbackCandidate(candidate, year, userAgent, signal) {
   const probeRes = await fetchWithTimeout(candidate.url, {
-    headers: { 'User-Agent': userAgent }
+    headers: { 'User-Agent': userAgent },
+    signal
   }, PROBE_TIMEOUT_MS);
 
   if (!probeRes.ok) {
@@ -175,13 +176,15 @@ async function mapWithConcurrency(items, concurrency, worker) {
 /**
  * SoloLatino Scraper
  */
-async function scrape(title, originalTitle, year, type, season, episode) {
+async function scrape(title, originalTitle, year, type, season, episode, options = {}) {
+  const { signal } = options;
   const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   async function performSearch(searchQuery) {
     const searchUrl = `https://sololatino.net/buscar?q=${encodeURIComponent(searchQuery)}`;
     const res = await fetchWithTimeout(searchUrl, {
-      headers: { 'User-Agent': userAgent }
+      headers: { 'User-Agent': userAgent },
+      signal
     }, SEARCH_TIMEOUT_MS);
     if (!res.ok) return [];
 
@@ -240,7 +243,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     if (!bestMatch) {
       for (const candidate of buildFallbackUrls(type, title, originalTitle)) {
         try {
-          const probedCandidate = await probeFallbackCandidate(candidate, year, userAgent);
+          const probedCandidate = await probeFallbackCandidate(candidate, year, userAgent, signal);
           if (probedCandidate) {
             console.log(`SoloLatino: Using direct URL fallback ${probedCandidate.url}`);
             bestMatch = probedCandidate;
@@ -273,7 +276,8 @@ async function scrape(title, originalTitle, year, type, season, episode) {
       headers: {
         'User-Agent': userAgent,
         'Accept': 'application/json'
-      }
+      },
+      signal
     }, API_TIMEOUT_MS);
     if (!csrfRes.ok) {
       console.warn(`SoloLatino: Sanctum handshake failed with status ${csrfRes.status}`);
@@ -303,7 +307,8 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     const pageRes = await fetchWithTimeout(targetPageUrl, {
       headers: {
         'User-Agent': userAgent
-      }
+      },
+      signal
     }, PAGE_TIMEOUT_MS);
     if (!pageRes.ok) {
       console.warn(`SoloLatino: Failed to fetch target page: ${targetPageUrl} (${pageRes.status})`);
@@ -350,6 +355,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
             'Referer': targetPageUrl,
             'Origin': 'https://sololatino.net'
           },
+          signal,
           body: JSON.stringify({ t: pInfo.token })
         }, API_TIMEOUT_MS);
 
@@ -366,7 +372,8 @@ async function scrape(title, originalTitle, year, type, season, episode) {
                 // If it is player.pelisserieshoy.com, perform the s.php handshake to fetch direct streams!
                 if (streamUrl.includes('player.pelisserieshoy.com')) {
                   const pPageRes = await fetchWithTimeout(streamUrl, {
-                    headers: { 'User-Agent': userAgent, 'Referer': 'https://sololatino.net/' }
+                    headers: { 'User-Agent': userAgent, 'Referer': 'https://sololatino.net/' },
+                    signal
                   }, PAGE_TIMEOUT_MS);
                   if (pPageRes.ok) {
                     const pHtml = await pPageRes.text();
@@ -383,6 +390,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
                           'Referer': streamUrl,
                           'Origin': 'https://player.pelisserieshoy.com'
                         },
+                        signal,
                         body: new URLSearchParams({ a: 'click', tok: tToken })
                       }, API_TIMEOUT_MS);
 
@@ -395,6 +403,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
                           'Referer': streamUrl,
                           'Origin': 'https://player.pelisserieshoy.com'
                         },
+                        signal,
                         body: new URLSearchParams({ a: '1', tok: tToken })
                       }, API_TIMEOUT_MS);
 
@@ -412,6 +421,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
                               'Referer': streamUrl,
                               'Origin': 'https://player.pelisserieshoy.com'
                             },
+                            signal,
                             body: new URLSearchParams({ a: '2', v: sVal, tok: tToken })
                           }, API_TIMEOUT_MS);
 
@@ -423,7 +433,8 @@ async function scrape(title, originalTitle, year, type, season, episode) {
                               const redirectCheck = await fetchWithTimeout(pathUrl, {
                                 method: 'GET',
                                 headers: { 'User-Agent': userAgent, 'Referer': streamUrl },
-                                redirect: 'manual'
+                                redirect: 'manual',
+                                signal
                               }, API_TIMEOUT_MS);
                               if (redirectCheck.status === 302 || redirectCheck.status === 301) {
                                 directUrl = redirectCheck.headers.get('location');
@@ -441,7 +452,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
                   }
                 } else {
                   // Standard direct extraction / Dean Edwards unpacker fallback / Embed69 recursive resolution
-                  directUrl = await unpacker.resolvePlayerStream(streamUrl, userAgent, 'https://sololatino.net/');
+                  directUrl = await unpacker.resolvePlayerStream(streamUrl, userAgent, 'https://sololatino.net/', { signal });
                 }
               } catch (e) {
                 console.error(`SoloLatino: Error unpacking iframe ${streamUrl}:`, e.message);

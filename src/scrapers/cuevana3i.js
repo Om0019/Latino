@@ -79,9 +79,9 @@ async function mapWithConcurrency(items, concurrency, worker) {
   return results;
 }
 
-async function resolveWithTimeout(url, userAgent, referer) {
+async function resolveWithTimeout(url, userAgent, referer, signal) {
   return Promise.race([
-    unpacker.resolvePlayerStream(url, userAgent, referer),
+    unpacker.resolvePlayerStream(url, userAgent, referer, { signal }),
     new Promise((resolve) => setTimeout(() => resolve(null), PLAYER_RESOLVE_TIMEOUT_MS))
   ]);
 }
@@ -167,10 +167,11 @@ function decodeWrapperUrl(wrapperUrl) {
   return null;
 }
 
-async function probePage(candidate, userAgent) {
+async function probePage(candidate, userAgent, signal) {
   try {
     const res = await fetchWithTimeout(candidate.url, {
-      headers: { 'User-Agent': userAgent }
+      headers: { 'User-Agent': userAgent },
+      signal
     }, PROBE_TIMEOUT_MS);
 
     if (!res.ok) return null;
@@ -180,7 +181,8 @@ async function probePage(candidate, userAgent) {
   }
 }
 
-async function scrape(title, originalTitle, year, type, season, episode) {
+async function scrape(title, originalTitle, year, type, season, episode, options = {}) {
+  const { signal } = options;
   const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   try {
@@ -188,7 +190,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     const candidates = buildPageCandidates(type, title, originalTitle);
 
     for (const candidate of candidates) {
-      bestMatch = await probePage(candidate, userAgent);
+      bestMatch = await probePage(candidate, userAgent, signal);
       if (bestMatch) {
         console.log(`Cuevana3i: Using candidate URL ${bestMatch.url}`);
         break;
@@ -205,7 +207,8 @@ async function scrape(title, originalTitle, year, type, season, episode) {
       : bestMatch.url;
 
     const pageRes = await fetchWithTimeout(targetPageUrl, {
-      headers: { 'User-Agent': userAgent }
+      headers: { 'User-Agent': userAgent },
+      signal
     }, PAGE_TIMEOUT_MS);
     if (!pageRes.ok) {
       console.warn(`Cuevana3i: Failed to fetch target page ${targetPageUrl} (${pageRes.status})`);
@@ -225,7 +228,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
       let directUrl = null;
       if (decodedUrl) {
         try {
-          directUrl = await resolveWithTimeout(decodedUrl, userAgent, targetPageUrl);
+          directUrl = await resolveWithTimeout(decodedUrl, userAgent, targetPageUrl, signal);
         } catch (err) {
           console.error(`Cuevana3i: Error resolving decoded player for ${optionName}:`, err.message);
         }

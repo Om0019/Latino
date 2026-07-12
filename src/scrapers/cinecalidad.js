@@ -68,7 +68,7 @@ function extractExternalDownloadLinks(movieDoc) {
   return links;
 }
 
-async function isPlayableDownloadTarget(url, userAgent, referer) {
+async function isPlayableDownloadTarget(url, userAgent, referer, signal) {
   try {
     const res = await fetchWithTimeout(url, {
       method: 'HEAD',
@@ -76,7 +76,8 @@ async function isPlayableDownloadTarget(url, userAgent, referer) {
       headers: {
         'User-Agent': userAgent,
         'Referer': referer
-      }
+      },
+      signal
     }, VALIDATION_TIMEOUT_MS);
 
     const contentType = (res.headers.get('content-type') || '').toLowerCase();
@@ -100,13 +101,14 @@ async function isPlayableDownloadTarget(url, userAgent, referer) {
   return false;
 }
 
-async function resolveDownloadPage(downloadPageUrl, userAgent, referer) {
+async function resolveDownloadPage(downloadPageUrl, userAgent, referer, signal) {
   try {
     const res = await fetchWithTimeout(downloadPageUrl, {
       headers: {
         'User-Agent': userAgent,
         'Referer': referer
-      }
+      },
+      signal
     }, PAGE_TIMEOUT_MS);
     if (!res.ok) return null;
 
@@ -171,18 +173,22 @@ async function waitForPlayerResolvers(playerPromises, streams) {
     const reason = completed === 'enough-streams' ? 'fast player target met' : 'timeout';
     console.warn(`Cinecalidad: Returning ${streams.length} resolved player streams (${reason}); slow wrappers still pending.`);
   }
+
+  return completed;
 }
 
 /**
  * Cinecalidad Scraper (Direct Streams)
  */
-async function scrape(title, originalTitle, year, type, season, episode) {
+async function scrape(title, originalTitle, year, type, season, episode, options = {}) {
+  const { signal } = options;
   const userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   async function performSearch(searchQuery) {
     const searchUrl = `https://www.cinecalidad.am/?s=${encodeURIComponent(searchQuery)}`;
     const res = await fetchWithTimeout(searchUrl, {
-      headers: { 'User-Agent': userAgent }
+      headers: { 'User-Agent': userAgent },
+      signal
     }, SEARCH_TIMEOUT_MS);
     if (!res.ok) return [];
 
@@ -282,7 +288,8 @@ async function scrape(title, originalTitle, year, type, season, episode) {
 
     // Fetch movie page to get player tabs
     const movieRes = await fetchWithTimeout(targetPageUrl, {
-      headers: { 'User-Agent': userAgent }
+      headers: { 'User-Agent': userAgent },
+      signal
     }, PAGE_TIMEOUT_MS);
     if (!movieRes.ok) return [];
 
@@ -317,9 +324,19 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     const externalDownloadLinks = extractExternalDownloadLinks(movieDoc);
 
     // Concurrently fetch player pages and extract direct video streams
+    const playerController = new AbortController();
+    const abortPlayerResolvers = () => playerController.abort();
+    if (signal) {
+      if (signal.aborted) {
+        playerController.abort();
+      } else {
+        signal.addEventListener('abort', abortPlayerResolvers, { once: true });
+      }
+    }
+
     const playerPromises = sortedPlayerOptions.map(async (opt) => {
       try {
-        const directUrl = await unpacker.resolvePlayerStream(opt.playerUrl, userAgent, targetPageUrl);
+        const directUrl = await unpacker.resolvePlayerStream(opt.playerUrl, userAgent, targetPageUrl, { signal: playerController.signal });
 
         if (directUrl) {
           const streamObj = {
@@ -343,13 +360,19 @@ async function scrape(title, originalTitle, year, type, season, episode) {
       }
     });
 
-    await waitForPlayerResolvers(playerPromises, streams);
+    const playerCompletion = await waitForPlayerResolvers(playerPromises, streams);
+    if (playerCompletion !== 'complete') {
+      playerController.abort();
+    }
+    if (signal) {
+      signal.removeEventListener('abort', abortPlayerResolvers);
+    }
 
     const downloadTargets = await Promise.all(
       downloadPageLinks.map(async (downloadLink) => {
-        const resolvedUrl = await resolveDownloadPage(downloadLink.downloadPageUrl, userAgent, targetPageUrl);
+        const resolvedUrl = await resolveDownloadPage(downloadLink.downloadPageUrl, userAgent, targetPageUrl, signal);
         if (!resolvedUrl) return null;
-        const isPlayable = await isPlayableDownloadTarget(resolvedUrl, userAgent, targetPageUrl);
+        const isPlayable = await isPlayableDownloadTarget(resolvedUrl, userAgent, targetPageUrl, signal);
         if (!isPlayable) return null;
 
         return {
@@ -374,7 +397,7 @@ async function scrape(title, originalTitle, year, type, season, episode) {
     }
 
     for (const link of externalDownloadLinks) {
-      const isPlayable = await isPlayableDownloadTarget(link.downloadUrl, userAgent, targetPageUrl);
+      const isPlayable = await isPlayableDownloadTarget(link.downloadUrl, userAgent, targetPageUrl, signal);
       if (!isPlayable) continue;
 
       if (!streams.some((stream) => stream.url === link.downloadUrl)) {
