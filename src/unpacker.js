@@ -150,6 +150,11 @@ function isWaawHost(value) {
   return /(^|\.)waaw\.to$/i.test(host);
 }
 
+function isNuploadHost(value) {
+  const host = getHostname(value);
+  return /(^|\.)n(?:u)?upload\.(?:top|me)$/i.test(host);
+}
+
 function normalizeWaawEmbedUrl(url, referer) {
   if (!isWaawHost(url)) return url;
 
@@ -234,6 +239,58 @@ function extractVoeDirectStream(html, baseUrl) {
     } catch {
       // Ignore unrelated JSON script tags.
     }
+  }
+
+  return null;
+}
+
+function extractNuploadDirectStream(html, baseUrl) {
+  if (!html) return null;
+
+  try {
+    const fileVarMatch = html.match(/file\s*:\s*([A-Za-z_$][\w$]*)\s*\+/);
+    const fileVarName = fileVarMatch?.[1];
+    const loopRegex = fileVarName
+      ? new RegExp(`var\\s+${fileVarName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*=\\s*"";\\s*([A-Za-z_$][\\w$]*)\\.forEach[\\s\\S]{0,500}?-\\s*(\\d+)`)
+      : null;
+    const loopMatch = loopRegex ? html.match(loopRegex) : null;
+    const loopMatches = loopMatch ? [loopMatch] : [];
+
+    if (loopMatches.length === 0) {
+      const fallbackRegex = /var\s+([A-Za-z_$][\w$]*)\s*=\s*"";\s*([A-Za-z_$][\w$]*)\.forEach[\s\S]{0,500}?-\s*(\d+)/g;
+      let fallbackMatch;
+      while ((fallbackMatch = fallbackRegex.exec(html)) !== null) {
+        loopMatches.push(fallbackMatch);
+      }
+    }
+
+    for (const candidateMatch of loopMatches) {
+      const arrayName = fileVarName ? candidateMatch[1] : candidateMatch[2];
+      const subtractValue = parseInt(fileVarName ? candidateMatch[2] : candidateMatch[3], 10);
+      const arrayPattern = new RegExp(`var\\s+${arrayName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*=\\s*(\\[[\\s\\S]*?\\]);`);
+      const arrayMatch = html.match(arrayPattern);
+      if (!arrayMatch) continue;
+
+      const encodedParts = JSON.parse(arrayMatch[1]);
+      const streamUrl = encodedParts.map((part) => {
+        const digits = Buffer.from(part, 'base64').toString('utf8').replace(/\D/g, '');
+        return String.fromCharCode(parseInt(digits, 10) - subtractValue);
+      }).join('');
+
+      if (!/\.(?:m3u8|mp4|mkv)(?:$|[?#])/i.test(streamUrl)) continue;
+
+      const sessionMatch = html.match(/\bsesz\s*=\s*["']([^"']+)["']/);
+      const directUrl = normalizeUrl(streamUrl, baseUrl);
+      if (!directUrl || !sessionMatch) return directUrl;
+
+      const parsed = new URL(directUrl);
+      if (!parsed.searchParams.has('s')) {
+        parsed.searchParams.set('s', sessionMatch[1]);
+      }
+      return parsed.toString();
+    }
+  } catch (error) {
+    console.warn(`Unpacker: Nupload decode failed: ${error.message}`);
   }
 
   return null;
@@ -621,6 +678,11 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
 
             return null;
         }
+
+        if (isNuploadHost(url)) {
+            const nuploadDirectUrl = extractNuploadDirectStream(html, url);
+            if (nuploadDirectUrl) return nuploadDirectUrl;
+        }
         
         // emturbovid / turbovidhls: extract m3u8 from data-hash attribute or urlPlay variable
         if (url.includes('emturbovid') || url.includes('turbovidhls') || url.includes('turboviplay')) {
@@ -633,8 +695,8 @@ async function resolvePlayerStream(url, userAgent, referer, options = {}) {
         const doodDirectUrl = await resolveDood(html, url, userAgent);
         if (doodDirectUrl) return doodDirectUrl;
 
-        // Check if it's embed69
-        if (url.includes('embed69')) {
+        // Check if it's embed69, including mirrored /vidurl pages that serve Embed69 HTML.
+        if (url.includes('embed69') || (html.includes('POW_CHALLENGE') && html.includes('dataLink'))) {
             const embed69Links = decryptEmbed69(html);
             if (embed69Links && embed69Links.length > 0) {
                 // Try resolving the first valid video embed (e.g. vidhide)

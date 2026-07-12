@@ -4,6 +4,8 @@ const cinecalidad = require('./cinecalidad');
 const tioplus = require('./tioplus');
 const cinehdplus = require('./cinehdplus');
 const cuevana3i = require('./cuevana3i');
+const lamovie = require('./lamovie');
+const pelispedia = require('./pelispedia');
 const { fetchWithTimeout, normalizeUrl } = require('../http');
 
 const SCRAPER_TIMEOUT_MS = 10000;
@@ -93,14 +95,54 @@ function scoreStream(stream) {
   else if (host.includes('dramiyos-cdn.com') || host.includes('cfglobalcdn.com')) baseScore = 4;
   else if (host.includes('mediafire.com') || host.includes('fireload.com')) baseScore = 5;
   else if (host.includes('goodstream')) baseScore = 6;
+  else if (host.includes('nupload')) baseScore = 6;
   else if (host.includes('premilkyway.com') || title.includes('hlswish')) baseScore = 7;
   else if (host.includes('cdn-tnmr.org')) baseScore = 8;
 
   return baseScore + healthPenalty;
 }
 
+function getHostFamily(stream) {
+  const host = getStreamHost(stream);
+  const title = (stream.title || '').toLowerCase();
+
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(host)) return 'pelisplus-ip';
+  if (host.includes('turboviplay.com')) return 'turboviplay';
+  if (host.includes('vimeos')) return 'vimeos';
+  if (host.includes('acek-cdn.com')) return 'acek-cdn';
+  if (host.includes('dramiyos-cdn.com')) return 'dramiyos-cdn';
+  if (host.includes('cfglobalcdn.com')) return 'cfglobalcdn';
+  if (host.includes('mediafire.com')) return 'mediafire';
+  if (host.includes('fireload.com')) return 'fireload';
+  if (host.includes('goodstream')) return 'goodstream';
+  if (host.includes('nupload')) return 'nupload';
+  if (host.includes('premilkyway.com') || title.includes('hlswish')) return 'hlswish';
+  if (host.includes('cdn-tnmr.org')) return 'cdn-tnmr';
+  return host || 'unknown';
+}
+
 function sortStreams(streams) {
-  return [...streams].sort((a, b) => scoreStream(a) - scoreStream(b));
+  const ranked = [...streams].sort((a, b) => scoreStream(a) - scoreStream(b));
+  const byFamily = new Map();
+
+  for (const stream of ranked) {
+    const family = getHostFamily(stream);
+    if (!byFamily.has(family)) byFamily.set(family, []);
+    byFamily.get(family).push(stream);
+  }
+
+  const sortedFamilies = [...byFamily.entries()]
+    .sort((a, b) => scoreStream(a[1][0]) - scoreStream(b[1][0]));
+
+  const diversified = [];
+  while (sortedFamilies.some(([, familyStreams]) => familyStreams.length > 0)) {
+    for (const [, familyStreams] of sortedFamilies) {
+      const stream = familyStreams.shift();
+      if (stream) diversified.push(stream);
+    }
+  }
+
+  return diversified;
 }
 
 function uniqueStreams(streams) {
@@ -408,7 +450,9 @@ async function getStreamsUncached(type, id, season, episode) {
       { name: 'SoloLatino', promise: withTimeout(sololatino.scrape(title, originalTitle, year, type, season, episode), SOLOLATINO_TIMEOUT_MS, 'SoloLatino') },
       { name: 'Cinecalidad', promise: withTimeout(cinecalidad.scrape(title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, 'Cinecalidad') },
       { name: 'TioPlus', promise: withTimeout(tioplus.scrape(title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, 'TioPlus') },
-      { name: 'Cuevana3i', promise: withTimeout(cuevana3i.scrape(title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, 'Cuevana3i') }
+      { name: 'Cuevana3i', promise: withTimeout(cuevana3i.scrape(title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, 'Cuevana3i') },
+      { name: 'LaMovie', promise: withTimeout(lamovie.scrape(title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, 'LaMovie') },
+      { name: 'PelisPedia', promise: withTimeout(pelispedia.scrape(title, originalTitle, year, type, season, episode), SCRAPER_TIMEOUT_MS, 'PelisPedia') }
     ];
 
     if (ENABLE_CINEHDPLUS) {
