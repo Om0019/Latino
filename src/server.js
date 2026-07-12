@@ -14,7 +14,7 @@ app.use(express.json());
 // Declare the Stremio Addon Manifest
 const manifest = {
   id: 'com.latino.spanish',
-  version: '1.0.0',
+  version: '1.0.1',
   name: 'Latino 🇲🇽',
   description: 'Películas y Series en Español Latino y Castellano directas de Cinecalidad, SoloLatino, TioPlus, Cuevana3i y CineHDPlus.',
   logo: 'https://images.unsplash.com/photo-1574267431422-7bda297781f5?q=80&w=256&auto=format&fit=crop',
