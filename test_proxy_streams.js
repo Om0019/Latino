@@ -59,9 +59,25 @@ function testProxyUrl() {
 
   const parsed = new URL(url);
   assert.strictEqual(parsed.origin, 'https://addon.example');
-  assert.strictEqual(parsed.pathname, '/proxy/stream');
+  assert.strictEqual(parsed.pathname, '/proxy/stream.m3u8');
   assert.strictEqual(parsed.searchParams.get('url'), 'https://video.example/master.m3u8?token=a b');
   assert.strictEqual(parsed.searchParams.get('referer'), 'https://embed.example/player');
+
+  assert.strictEqual(
+    new URL(proxiedStreamUrl('https://addon.example', 'https://video.example/segment001.ts', '')).pathname,
+    '/proxy/segment.ts',
+    'transport stream segments keep a .ts proxy extension'
+  );
+  assert.strictEqual(
+    new URL(proxiedStreamUrl('https://addon.example', 'https://video.example/key.key', '')).pathname,
+    '/proxy/key.key',
+    'HLS key URLs keep a .key proxy extension'
+  );
+  assert.strictEqual(
+    new URL(proxiedStreamUrl('https://addon.example', 'https://video.example/movie.bin', '')).pathname,
+    '/proxy/stream.mp4',
+    'bin direct video URLs are presented as mp4 to players'
+  );
 }
 
 function testHlsRewrite() {
@@ -83,7 +99,9 @@ function testHlsRewrite() {
     fakeReq('https://addon.example', 'https://embed.example/player')
   );
 
-  assert(rewritten.includes('https://addon.example/proxy/stream?url='), 'rewritten manifest contains proxied URLs');
+  assert(rewritten.includes('https://addon.example/proxy/stream.m3u8?url='), 'rewritten manifest contains proxied HLS playlist URLs');
+  assert(rewritten.includes('https://addon.example/proxy/segment.ts?url='), 'rewritten manifest contains proxied segment URLs with media extension');
+  assert(rewritten.includes('https://addon.example/proxy/key.key?url='), 'rewritten manifest contains proxied key URLs with key extension');
   assert(rewritten.includes(encodeURIComponent('https://origin.example/path/variant/index.m3u8')), 'relative variant playlist is rewritten');
   assert(rewritten.includes(encodeURIComponent('https://origin.example/path/keys/main.key')), 'relative key URI is rewritten');
   assert(rewritten.includes(encodeURIComponent('https://origin.example/path/init.mp4')), 'relative init map URI is rewritten');

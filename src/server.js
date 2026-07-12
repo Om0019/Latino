@@ -59,8 +59,26 @@ function shouldProxyStream(stream) {
   }
 }
 
+function getProxyFilename(targetUrl) {
+  try {
+    const parsed = new URL(targetUrl);
+    const pathname = parsed.pathname.toLowerCase();
+    if (pathname.endsWith('.m3u8')) return 'stream.m3u8';
+    if (pathname.endsWith('.ts')) return 'segment.ts';
+    if (pathname.endsWith('.m4s')) return 'segment.m4s';
+    if (pathname.endsWith('.mp4') || pathname.endsWith('.bin')) return 'stream.mp4';
+    if (pathname.endsWith('.mkv')) return 'stream.mkv';
+    if (pathname.endsWith('.key')) return 'key.key';
+  } catch {
+    // Fall through to the generic name.
+  }
+
+  return 'stream';
+}
+
 function proxiedStreamUrl(baseUrl, targetUrl, referer) {
-  return `${baseUrl}/proxy/stream?url=${encodeURIComponent(targetUrl)}&referer=${encodeURIComponent(referer || '')}`;
+  const filename = getProxyFilename(targetUrl);
+  return `${baseUrl}/proxy/${filename}?url=${encodeURIComponent(targetUrl)}&referer=${encodeURIComponent(referer || '')}`;
 }
 
 function rewriteHlsManifest(manifestText, targetUrl, req) {
@@ -119,7 +137,7 @@ app.get('/manifest.json', (req, res) => {
   res.json(manifest);
 });
 
-app.get('/proxy/stream', async (req, res) => {
+app.get(['/proxy/stream', '/proxy/:filename'], async (req, res) => {
   const targetUrl = req.query.url;
   const referer = req.query.referer || 'https://sololatino.net/';
 
@@ -655,6 +673,7 @@ app.get('/', (req, res) => {
 
 app.__test = {
   shouldProxyStream,
+  getProxyFilename,
   proxiedStreamUrl,
   rewriteHlsManifest
 };
