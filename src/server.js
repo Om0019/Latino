@@ -106,6 +106,15 @@ function rewriteHlsManifest(manifestText, targetUrl, req) {
     .join('\n');
 }
 
+function isLikelyHlsManifestUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return /\.m3u8(?:$|[?#])/i.test(parsed.pathname + parsed.search);
+  } catch {
+    return false;
+  }
+}
+
 function wrapProxyStreams(streams, req) {
   const baseUrl = getPublicBaseUrl(req);
 
@@ -163,7 +172,8 @@ app.get(['/proxy/stream', '/proxy/:filename'], async (req, res) => {
     };
 
     const range = req.get('range');
-    if (range) {
+    const requestIsHlsManifest = isLikelyHlsManifestUrl(targetUrl);
+    if (range && !requestIsHlsManifest) {
       headers.Range = range;
     }
 
@@ -171,20 +181,17 @@ app.get(['/proxy/stream', '/proxy/:filename'], async (req, res) => {
       headers
     }, PROXY_FETCH_TIMEOUT_MS);
 
-    res.status(upstream.status);
-
     const contentType = upstream.headers.get('content-type') || '';
     const contentLength = upstream.headers.get('content-length');
     const contentRange = upstream.headers.get('content-range');
     const acceptRanges = upstream.headers.get('accept-ranges');
-    const isHlsManifest = /\.m3u8(?:$|[?#])/i.test(parsed.pathname + parsed.search)
+    const isHlsManifest = requestIsHlsManifest
       || contentType.toLowerCase().includes('mpegurl')
       || contentType.toLowerCase().includes('application/vnd.apple');
 
+    res.status(isHlsManifest ? 200 : upstream.status);
     res.setHeader('Content-Type', isHlsManifest ? 'application/vnd.apple.mpegurl' : (contentType || 'application/octet-stream'));
     res.setHeader('Content-Disposition', 'inline');
-    if (contentRange) res.setHeader('Content-Range', contentRange);
-    if (acceptRanges) res.setHeader('Accept-Ranges', acceptRanges);
     res.setHeader('Access-Control-Allow-Origin', '*');
 
     if (isHlsManifest) {
@@ -193,6 +200,8 @@ app.get(['/proxy/stream', '/proxy/:filename'], async (req, res) => {
       return;
     }
 
+    if (contentRange) res.setHeader('Content-Range', contentRange);
+    if (acceptRanges) res.setHeader('Accept-Ranges', acceptRanges);
     if (contentLength) res.setHeader('Content-Length', contentLength);
 
     if (!upstream.body) {
@@ -674,6 +683,7 @@ app.get('/', (req, res) => {
 app.__test = {
   shouldProxyStream,
   getProxyFilename,
+  isLikelyHlsManifestUrl,
   proxiedStreamUrl,
   rewriteHlsManifest
 };

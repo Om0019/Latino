@@ -3,6 +3,7 @@ const app = require('./src/server');
 
 const {
   shouldProxyStream,
+  isLikelyHlsManifestUrl,
   proxiedStreamUrl,
   rewriteHlsManifest
 } = app.__test;
@@ -51,6 +52,9 @@ function testProxyDecisions() {
 }
 
 function testProxyUrl() {
+  assert.strictEqual(isLikelyHlsManifestUrl('https://video.example/master.m3u8?token=abc'), true);
+  assert.strictEqual(isLikelyHlsManifestUrl('https://video.example/segment001.ts'), false);
+
   const url = proxiedStreamUrl(
     'https://addon.example',
     'https://video.example/master.m3u8?token=a b',
